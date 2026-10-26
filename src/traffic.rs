@@ -5,12 +5,15 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+
+use crate::config;
+use crate::discover::{self, Candidate, DiscoverOptions};
 
 pub const ROUTE_PATH: &str = "/proc/net/route";
 
@@ -126,6 +129,99 @@ pub fn read_gateway(path: &Path, iface: &str) -> Result<Option<Ipv4Addr>> {
     let table =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     Ok(gateway_for(&table, iface))
+}
+
+/// `--keepalive-target`: an address, or `auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepaliveTarget {
+    Ip(IpAddr),
+    /// The gateway if it answers pings, otherwise the best device found by
+    /// discovery.
+    Auto,
+}
+
+/// Parse `--keepalive-target`: `auto` (any case) or an IP address.
+pub fn parse_keepalive_target(s: &str) -> Result<KeepaliveTarget, String> {
+    if s.trim().eq_ignore_ascii_case("auto") {
+        return Ok(KeepaliveTarget::Auto);
+    }
+    s.trim()
+        .parse()
+        .map(KeepaliveTarget::Ip)
+        .map_err(|_| format!("expected an IP address or `auto`, got {s:?}"))
+}
+
+/// The device `--keepalive-target auto` pings when the gateway doesn't
+/// answer, from candidates ranked best first (see
+/// [`discover::rank_candidates`]), with the reason. Only devices that
+/// answered pings qualify. A fixed (universal) MAC is preferred over a
+/// randomized one: such devices are usually phones, which come and go and
+/// sleep.
+pub fn choose_keepalive_target(ranked: &[Candidate]) -> Option<(&Candidate, &'static str)> {
+    let answering = || ranked.iter().filter(|c| c.received > 0);
+    if let Some(c) = answering().find(|c| !c.randomized_mac) {
+        return Some((c, "the most reliable device with a fixed MAC address"));
+    }
+    answering().next().map(|c| {
+        (
+            c,
+            "the most reliable device; every device that answered uses a randomized MAC, so \
+             it may leave or sleep",
+        )
+    })
+}
+
+/// Resolve `--keepalive-target auto` for `iface`: the gateway if it answers
+/// a few pings (the same as without the flag), otherwise the device chosen
+/// by [`choose_keepalive_target`] after a discovery of the subnet.
+pub async fn auto_target(iface: &str, gateway: Option<Ipv4Addr>) -> Result<IpAddr> {
+    if let Some(gateway) = gateway {
+        let stats = discover::ping_host(
+            gateway,
+            config::DEFAULT_AUTO_GATEWAY_PINGS,
+            config::DEFAULT_DISCOVER_TIMEOUT_S,
+        )
+        .await?;
+        if stats.received > 0 {
+            tracing::info!(
+                "keepalive auto: the gateway {gateway} answers pings ({}/{}); using it",
+                stats.received,
+                stats.sent
+            );
+            return Ok(IpAddr::V4(gateway));
+        }
+        tracing::info!(
+            "keepalive auto: the gateway {gateway} doesn't answer pings; looking for another \
+             device on {iface}"
+        );
+    } else {
+        tracing::info!("keepalive auto: no default gateway on {iface}; looking for a device");
+    }
+    let found = discover::discover(&DiscoverOptions {
+        iface: iface.to_string(),
+        count: config::DEFAULT_DISCOVER_COUNT,
+        timeout_s: config::DEFAULT_DISCOVER_TIMEOUT_S,
+        concurrency: config::DEFAULT_DISCOVER_CONCURRENCY,
+        allow_large_subnet: false,
+    })
+    .await?;
+    let (chosen, why) = choose_keepalive_target(&found.candidates).ok_or_else(|| {
+        anyhow!(
+            "no device on {} answered pings, so --keepalive-target auto found no target; run \
+             with --no-keepalive, or pass --keepalive-target IP with a device you know answers",
+            found.subnet
+        )
+    })?;
+    let ms = |v: Option<f64>| v.map_or_else(|| "?".to_string(), |v| format!("{v:.1} ms"));
+    tracing::info!(
+        "keepalive auto: using {} ({}/{} replies, median {}, jitter {}): {why}",
+        chosen.ip,
+        chosen.received,
+        chosen.sent,
+        ms(chosen.median_rtt_ms),
+        ms(chosen.jitter_ms)
+    );
+    Ok(IpAddr::V4(chosen.ip))
 }
 
 /// `ping` arguments for a keepalive at `interval_s` seconds.
@@ -307,5 +403,81 @@ mod tests {
             ping_args(target, 1.0),
             ["-i", "1", "-q", "-n", "192.168.1.1"]
         );
+    }
+
+    #[test]
+    fn keepalive_target_values() {
+        assert_eq!(parse_keepalive_target("auto"), Ok(KeepaliveTarget::Auto));
+        assert_eq!(parse_keepalive_target("AUTO"), Ok(KeepaliveTarget::Auto));
+        assert_eq!(
+            parse_keepalive_target("192.168.1.2"),
+            Ok(KeepaliveTarget::Ip(IpAddr::V4(Ipv4Addr::new(
+                192, 168, 1, 2
+            ))))
+        );
+        assert!(matches!(
+            parse_keepalive_target("fe80::1"),
+            Ok(KeepaliveTarget::Ip(IpAddr::V6(_)))
+        ));
+        for bad in ["", "gateway", "192.168.1", "auto2"] {
+            assert!(parse_keepalive_target(bad).is_err(), "{bad}");
+        }
+    }
+
+    fn candidate(last: u8, received: u32, randomized_mac: bool) -> Candidate {
+        Candidate {
+            ip: Ipv4Addr::new(192, 168, 1, last),
+            mac: None,
+            sent: 5,
+            received,
+            response_rate: f64::from(received) / 5.0,
+            median_rtt_ms: (received > 0).then_some(4.0),
+            jitter_ms: (received > 0).then_some(1.0),
+            gateway: false,
+            randomized_mac,
+            no_icmp_reply: received == 0,
+            associated_ap: None,
+        }
+    }
+
+    fn chosen(ranked: &[Candidate]) -> Option<u8> {
+        choose_keepalive_target(ranked).map(|(c, _)| c.ip.octets()[3])
+    }
+
+    #[test]
+    fn auto_target_prefers_a_fixed_mac() {
+        // Ranked best first: a phone answers best, but a fixed device that
+        // answers reliably enough is the safer target.
+        let ranked = [
+            candidate(71, 5, true),
+            candidate(2, 5, false),
+            candidate(9, 4, false),
+        ];
+        assert_eq!(chosen(&ranked), Some(2));
+        let (_, why) = choose_keepalive_target(&ranked).unwrap();
+        assert!(why.contains("fixed MAC"), "{why}");
+        // Among fixed MACs, the ranking decides.
+        let ranked = [candidate(9, 4, false), candidate(2, 3, false)];
+        assert_eq!(chosen(&ranked), Some(9));
+    }
+
+    #[test]
+    fn auto_target_falls_back_to_randomized_macs() {
+        let ranked = [candidate(71, 5, true), candidate(110, 2, true)];
+        assert_eq!(chosen(&ranked), Some(71));
+        let (_, why) = choose_keepalive_target(&ranked).unwrap();
+        assert!(why.contains("randomized"), "{why}");
+    }
+
+    #[test]
+    fn auto_target_needs_a_device_that_answers_pings() {
+        // A fixed-MAC device that only answered ARP can't be pinged.
+        let ranked = [candidate(71, 3, true), candidate(5, 0, false)];
+        assert_eq!(chosen(&ranked), Some(71));
+        assert_eq!(
+            chosen(&[candidate(5, 0, false), candidate(6, 0, true)]),
+            None
+        );
+        assert_eq!(chosen(&[]), None);
     }
 }

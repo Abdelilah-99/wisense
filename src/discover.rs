@@ -802,7 +802,7 @@ pub async fn probe_hosts(
 
 /// Ping one host `count` times. ping exits 1 when nothing answered; that is
 /// a result here (0 received), not an error.
-async fn ping_host(ip: Ipv4Addr, count: u32, timeout_s: f64) -> Result<PingStats> {
+pub async fn ping_host(ip: Ipv4Addr, count: u32, timeout_s: f64) -> Result<PingStats> {
     let output = Command::new("ping")
         .args(probe_args(ip, count, timeout_s))
         .stdin(Stdio::null())

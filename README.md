@@ -144,7 +144,7 @@ The same flag groups appear in several commands:
 - **Source flags** (`calibrate`, `monitor`, `record`): `--iface`,
   `--rssi-source procfs|nl80211`, `--no-wifi`, `--esp32 PORT=NAME`
   (repeatable), `--baud`, `--poll-hz`, `--ping-interval`, `--no-keepalive`,
-  `--keepalive-target IP`.
+  `--keepalive-target IP|auto`.
 - **Detector flags** (`calibrate`, `monitor`, `replay`, `demo`):
   `--sensitivity`, `--window-ms`, `--on-ms`, `--off-ms`, `--metric diff|std`.
 - **Output flags** (`monitor`, `replay`, `demo`): `--json` or `--tui`.
@@ -309,10 +309,32 @@ The body has to cross the radio path to disturb it ([§11](docs/theory.md#the-fr
 | `--metric` | diff | `diff` (mean absolute first difference) or `std` (standard deviation). RSSI links only. |
 | `--poll-hz` | 20 | How often the laptop's RSSI is read. |
 | `--ping-interval` | 0.2 | Seconds between keepalive pings. Older ping versions refuse values below 0.2 s without root; the iputils on the author's laptop allows down to 0.002 s. |
-| `--keepalive-target` | gateway | Ping this address instead, e.g. if your router ignores pings. |
+| `--keepalive-target` | gateway | Ping this address instead, e.g. if your router ignores pings. `auto` keeps the gateway if it answers a few pings, and otherwise picks a device with `discover` (below). |
 
 After changing `--metric`, `--window-ms` or `--poll-hz`, run `calibrate`
 again with the same flags.
+
+### Choosing the keepalive target
+
+The keepalive target only needs to **answer reliably**. In client mode,
+traffic to any device on the network passes through the access point, and
+every reply reaches the laptop as a frame from that access point, so the
+sensed path stays laptop <-> access point whichever device you ping. That's
+why `discover` ranks devices by response rate and jitter before latency: a
+fast device that drops replies leaves gaps in the RSSI updates.
+
+`--keepalive-target auto` does this for you at start-up:
+
+1. It sends 3 pings to the gateway. If it answers, it is used, exactly as
+   without the flag.
+2. Otherwise it runs a discovery (about 20 s on a /24) and picks the
+   best-ranked device that answered, preferring a fixed MAC address over a
+   randomized one: phones use randomized ones, and they come and go and
+   sleep. The log says which device it chose and why.
+3. If nothing answers, it stops with an error suggesting `--no-keepalive` or
+   a manual `--keepalive-target IP`.
+
+`auto` is never the default: the gateway is.
 
 ### Tuning with record and replay
 
@@ -381,8 +403,11 @@ then says so and you can use the default procfs source.
 
 - **"RSSI hasn't changed for 3.0 s"**: the value isn't being refreshed.
   Check that the keepalive ping is running and that your router answers
-  pings. If it doesn't, use `--keepalive-target` with another device on your
-  network; `wisense discover` lists the ones that answer.
+  pings. If it doesn't, use `--keepalive-target auto`, or pass another
+  device on your network with `--keepalive-target IP`; `wisense discover`
+  lists the ones that answer. Any device that answers reliably works,
+  because the traffic passes through the access point either way
+  ([Choosing the keepalive target](#choosing-the-keepalive-target)).
 - **"keepalive ping ... exited"**: often `--ping-interval` is below what your
   ping allows without root.
 - **Motion never ends, or constant false alarms**: something keeps moving

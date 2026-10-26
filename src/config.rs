@@ -47,6 +47,8 @@ pub const DEFAULT_BAUD: u32 = 921_600;
 /// A new zone must stay on top this long before the zone switches.
 pub const DEFAULT_ZONE_HOLD_MS: u64 = 1000;
 
+/// `--keepalive-target auto`: pings sent to the gateway to see if it answers.
+pub const DEFAULT_AUTO_GATEWAY_PINGS: u32 = 3;
 /// `wisense discover`: pings sent to each address.
 pub const DEFAULT_DISCOVER_COUNT: u32 = 5;
 /// `wisense discover`: seconds to wait for each reply.

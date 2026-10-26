@@ -33,7 +33,7 @@ use source::procfs::{self, ProcfsConfig, ProcfsSource, Signal};
 use source::replay::ReplaySource;
 use source::synthetic::{random_bursts, SyntheticConfig, SyntheticSource};
 use source::SampleSource;
-use traffic::Keepalive;
+use traffic::{Keepalive, KeepaliveTarget};
 use zones::ZoneTracker;
 
 #[derive(Parser)]
@@ -137,9 +137,16 @@ struct SourceArgs {
     /// or beacons arrive, and may look perfectly still.
     #[arg(long)]
     no_keepalive: bool,
-    /// Ping this address instead of the interface's default gateway.
-    #[arg(long, conflicts_with = "no_keepalive")]
-    keepalive_target: Option<IpAddr>,
+    /// Ping this address instead of the interface's default gateway. `auto`
+    /// keeps the gateway if it answers pings, and otherwise picks the most
+    /// reliable device on the network (see `wisense discover`).
+    #[arg(
+        long,
+        value_name = "IP|auto",
+        conflicts_with = "no_keepalive",
+        value_parser = traffic::parse_keepalive_target
+    )]
+    keepalive_target: Option<KeepaliveTarget>,
 }
 
 /// Detector tuning flags shared by every command that detects motion.
@@ -698,7 +705,7 @@ async fn open_sources(args: &SourceArgs, detector: &DetectorArgs) -> Result<Open
             Ok(entry) => {
                 let iface = entry.iface.clone();
                 warn_if_ap_is_not_gateway(&iface);
-                keepalive = start_keepalive(args, &iface)?;
+                keepalive = start_keepalive(args, &iface).await?;
                 let source = open_wifi(args, &iface, keepalive.is_some()).await?;
                 tracing::info!(
                     "sensing on {iface} ({:?}, signal {}) at {} Hz",
@@ -830,14 +837,16 @@ fn warn_if_ap_is_not_gateway(iface: &str) {
 
 /// Start pinging the access point unless disabled. Without a gateway on the
 /// interface (and no explicit target) we warn and carry on without.
-fn start_keepalive(args: &SourceArgs, iface: &str) -> Result<Option<Keepalive>> {
+async fn start_keepalive(args: &SourceArgs, iface: &str) -> Result<Option<Keepalive>> {
     if args.no_keepalive {
         tracing::warn!("keepalive disabled: RSSI only updates when frames happen to arrive");
         return Ok(None);
     }
+    let gateway = traffic::read_gateway(Path::new(traffic::ROUTE_PATH), iface)?;
     let target = match args.keepalive_target {
-        Some(target) => target,
-        None => match traffic::read_gateway(Path::new(traffic::ROUTE_PATH), iface)? {
+        Some(KeepaliveTarget::Ip(target)) => target,
+        Some(KeepaliveTarget::Auto) => traffic::auto_target(iface, gateway).await?,
+        None => match gateway {
             Some(gateway) => IpAddr::V4(gateway),
             None => {
                 tracing::warn!(

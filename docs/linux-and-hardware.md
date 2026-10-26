@@ -85,8 +85,9 @@ wlp2s0  00000000     0101A8C0  0003   0       0    600     00000000
   - `-n` uses no DNS.
 - Older ping versions refuse intervals below 0.2 s without root. The iputils
   on the author's laptop (20240905) allows down to 2 ms.
-- If your router ignores pings, use `--keepalive-target` with another device
-  on the network: traffic to it still passes through the router.
+- If your router ignores pings, use `--keepalive-target auto`, or
+  `--keepalive-target` with another device on the network: traffic to it
+  still passes through the access point.
 
 ## Processes and signals
 
