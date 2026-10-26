@@ -9,6 +9,9 @@ boards.
 **Only use wisense on networks, devices and premises that you own or are
 explicitly allowed to monitor.**
 
+This repository also contains [homeguard](homeguard/README.md), a local home
+security hub that uses wisense as one of its motion sources.
+
 ## Contents
 
 1. [What it can and cannot do](#1-what-it-can-and-cannot-do)

@@ -1,0 +1,14 @@
+[package]
+name = "homeguard"
+version = "0.1.0"
+edition = "2021"
+description = "Local, self-hosted home security hub: alarm state machine, sensor fusion and alerts over MQTT"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Abdelilah-99/wisense"
+readme = "README.md"
+publish = false
+
+# Standalone: not a member of the wisense crate at the repository root.
+[workspace]
+
+[dependencies]
