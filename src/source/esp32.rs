@@ -97,10 +97,12 @@ pub fn parse_csi_line(line: &str) -> Result<CsiRecord, CsiParseError> {
     if raw.is_empty() || raw.len() % 2 != 0 {
         return Err(CsiParseError::BadLength(raw.len()));
     }
-    let amplitudes = raw
-        .chunks_exact(2)
-        .map(|pair| {
-            let (im, re) = (f32::from(pair[0]), f32::from(pair[1]));
+    // The length is even (checked above), so there is no remainder.
+    let (pairs, _) = raw.as_chunks::<2>();
+    let amplitudes = pairs
+        .iter()
+        .map(|&[im, re]| {
+            let (im, re) = (f32::from(im), f32::from(re));
             (re * re + im * im).sqrt()
         })
         .collect();
