@@ -341,7 +341,8 @@ fn cmd_list_ifaces() -> Result<()> {
         let noise = e
             .noise_dbm()
             .map_or_else(String::new, |n| format!(", noise {n} dBm"));
-        let gateway = traffic::gateway_for(&routes, &e.iface).map_or_else(
+        let gateway_ip = traffic::gateway_for(&routes, &e.iface);
+        let gateway = gateway_ip.map_or_else(
             || ", no default gateway".to_string(),
             |g| format!(", gateway {g}"),
         );
@@ -349,6 +350,12 @@ fn cmd_list_ifaces() -> Result<()> {
             "{:<16} signal {signal}, link quality {}{noise}, status 0x{:04x}{gateway}",
             e.iface, e.link_quality, e.status
         );
+        if let Some((link, ap)) = discover::read_associated_ap(&e.iface) {
+            println!("{:<16} {}", "", discover::describe_ap(&link, ap.as_ref()));
+            if let Some(warning) = ap.and_then(|ap| discover::ap_warning(&ap, gateway_ip)) {
+                tracing::warn!("{}: {warning}", e.iface);
+            }
+        }
     }
     let listed: BTreeSet<String> = entries.iter().map(|e| e.iface.clone()).collect();
     let unconnected: Vec<String> = procfs::sysfs_wireless_ifaces()
@@ -430,6 +437,12 @@ async fn cmd_discover(args: DiscoverArgs) -> Result<()> {
             .map_or_else(|| "unknown".to_string(), |ip| ip.to_string()),
         found.candidates.len()
     );
+    if let Some(warning) = found
+        .associated
+        .and_then(|ap| discover::ap_warning(&ap, found.gateway))
+    {
+        tracing::warn!("{}: {warning}", opts.iface);
+    }
     if args.json {
         let mut out = std::io::stdout().lock();
         for (i, candidate) in found.candidates.iter().enumerate() {
@@ -684,6 +697,7 @@ async fn open_sources(args: &SourceArgs, detector: &DetectorArgs) -> Result<Open
         match procfs::resolve_iface(Path::new(procfs::WIRELESS_PATH), args.iface.as_deref()) {
             Ok(entry) => {
                 let iface = entry.iface.clone();
+                warn_if_ap_is_not_gateway(&iface);
                 keepalive = start_keepalive(args, &iface)?;
                 let source = open_wifi(args, &iface, keepalive.is_some()).await?;
                 tracing::info!(
@@ -798,6 +812,20 @@ fn open_esp32(spec: &Esp32Spec, baud: u32) -> Result<Box<dyn SampleSource>> {
 #[cfg(not(feature = "esp32"))]
 fn open_esp32(_spec: &Esp32Spec, _baud: u32) -> Result<Box<dyn SampleSource>> {
     bail!("this build has no ESP32 support; rebuild with `cargo build --release --features esp32`")
+}
+
+/// The sensed path runs to the access point the laptop is associated with;
+/// say so when that is not the router at the gateway address.
+fn warn_if_ap_is_not_gateway(iface: &str) {
+    let Some((_, Some(ap))) = discover::read_associated_ap(iface) else {
+        return;
+    };
+    let gateway = traffic::read_gateway(Path::new(traffic::ROUTE_PATH), iface)
+        .ok()
+        .flatten();
+    if let Some(warning) = discover::ap_warning(&ap, gateway) {
+        tracing::warn!("{iface}: {warning}");
+    }
 }
 
 /// Start pinging the access point unless disabled. Without a gateway on the

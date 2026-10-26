@@ -57,8 +57,9 @@ It cannot:
    `build-essential` provides the C linker that Rust needs. `pkg-config` and
    `libudev-dev` are listed for the `esp32` feature's serial-port library.
    wisense builds that library without its udev support, so they're
-   optional, but installing them does no harm. `iw` is only used by
-   `list-aps`.
+   optional, but installing them does no harm. `iw` is used by `list-aps`
+   and to find the access point the laptop is associated with; sensing works
+   without it.
 
 2. Install Rust with rustup:
 
@@ -90,9 +91,16 @@ It cannot:
    ```
 
    This prints each connected wireless interface with its signal level and
-   default gateway, e.g.
-   `wlp2s0  signal -52 dBm, link quality 58, status 0x0000, gateway 192.168.1.1`.
-   If it says "not connected", connect to your WiFi first.
+   default gateway and, if `iw` is installed, the access point the laptop is
+   associated with, e.g.
+
+   ```text
+   wlp2s0           signal -52 dBm, link quality 58, status 0x0000, gateway 192.168.1.1
+                    associated AP: 192.168.1.1 (BSSID f4:fc:49:04:b2:b9)
+   ```
+
+   If it says "not connected", connect to your WiFi first. If the access
+   point isn't the gateway, it warns: see [Placement](#5-placement).
 
 5. Calibrate with the room empty:
 
@@ -122,7 +130,7 @@ motion and prints when the motion happens, so you can compare.
 
 | Command | What it does |
 |---|---|
-| `list-ifaces` | Wireless interfaces in `/proc/net/wireless`, with signal and gateway. |
+| `list-ifaces` | Wireless interfaces in `/proc/net/wireless`, with signal, gateway and the access point the laptop is associated with. |
 | `list-aps [--iface X]` | Access points the card sees, via `iw scan`. A fresh scan needs root (`sudo`); without it the kernel's cached results are shown. Not used for sensing. |
 | `discover [--iface X] [--count 5] [--timeout 1] [--concurrency 64] [--allow-large-subnet] [--json]` | Devices on the WiFi network, ranked as keepalive targets ([below](#finding-devices-on-the-network-discover)). |
 | `calibrate [--seconds 60] [--baseline FILE]` | Measures the idle baseline of every link and saves it. |
@@ -165,18 +173,21 @@ keepalive target first. It needs no root:
 
 ```text
 IP               MAC                     REPLIES     MEDIAN     JITTER  TAGS
-192.168.1.1      f4:fc:49:04:b2:b9      5/5 100%     3.9 ms     0.4 ms  gateway
+192.168.1.1      f4:fc:49:04:b2:b9      5/5 100%     3.9 ms     0.4 ms  gateway, associated AP
 192.168.1.20     38:91:48:aa:bb:cc      5/5 100%     5.2 ms     1.1 ms
 192.168.1.23     76:62:94:1a:2b:3c      4/5  80%   180.0 ms    95.3 ms  randomized MAC
 192.168.1.7      00:42:38:01:02:03      0/5   0%          -          -  no ICMP reply
 ```
 
-`randomized MAC` marks a locally administered "private" address, as phones
-use; such devices come and go and sleep. `--json` prints one object per
-device instead:
+`associated AP` marks the access point the laptop is associated with
+(`associated AP (likely)` for a near match; see
+[Placement](#5-placement)). `randomized MAC` marks a locally administered
+"private" address, as phones use; such devices come and go and sleep.
+`--json` prints one object per device instead (`associated_ap` is `null`,
+`"exact"` or `"likely"`):
 
 ```json
-{"rank":1,"ip":"192.168.1.1","mac":"f4:fc:49:04:b2:b9","sent":5,"received":5,"response_rate":1.0,"median_rtt_ms":3.9,"jitter_ms":0.4,"gateway":true,"randomized_mac":false,"no_icmp_reply":false,"tags":["gateway"]}
+{"rank":1,"ip":"192.168.1.1","mac":"f4:fc:49:04:b2:b9","sent":5,"received":5,"response_rate":1.0,"median_rtt_ms":3.9,"jitter_ms":0.4,"gateway":true,"randomized_mac":false,"no_icmp_reply":false,"associated_ap":"exact","tags":["gateway","associated AP"]}
 ```
 
 ## 4. Output
@@ -262,6 +273,17 @@ the scale of the score, and says why. A different ping interval only produces
 a warning.
 
 ## 5. Placement
+
+**Which device is "the router".** In client mode, every frame the laptop
+receives comes from the access point it is associated with, so the sensed
+radio path runs between the laptop and *that* device. With a mesh system or
+a repeater, it is often not the router at the gateway address. `wisense
+list-ifaces` shows the associated access point: it matches the access
+point's radio address (BSSID, from `iw dev <if> link`) with the MAC
+addresses of the devices on the network, exactly or, marked "likely", with
+an address one or two values off, as access points often use. When that
+device isn't the gateway, `list-ifaces`, `discover`, `calibrate` and
+`monitor` print a warning. Below, "the router" means that access point.
 
 The body has to cross the radio path to disturb it ([§11](docs/theory.md#the-fresnel-zone-why-the-body-must-cross-the-path)):
 

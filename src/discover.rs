@@ -8,6 +8,13 @@
 //! - MAC addresses, including whether one is a randomized "private" address;
 //! - `ping`'s output, and the ranking of the hosts that answered.
 //!
+//! The access point the laptop is associated with is found by matching its
+//! BSSID (from `iw dev <if> link`) against the MACs of the LAN devices. In
+//! client mode every frame the laptop receives comes from that access
+//! point, so the sensed radio path is laptop <-> that device, which is not
+//! necessarily the router at the gateway address (a mesh node or a
+//! repeater, say).
+//!
 //! Probing spawns one `ping` per address (at most `concurrency` at a time,
 //! killed if wisense stops), then reads the ARP table again: a device that
 //! ignores pings still had to answer ARP, so it shows up as "no ICMP reply".
@@ -27,12 +34,17 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::config;
+use crate::scan::{self, LinkInfo};
 use crate::traffic::{self, Route};
 
 pub const ARP_PATH: &str = "/proc/net/arp";
 
 /// `ATF_COM` from `<linux/if_arp.h>`: the entry is complete (resolved).
 const ATF_COM: u16 = 0x02;
+/// A LAN MAC whose last byte is at most this far from the BSSID's (same
+/// vendor prefix) is "likely" the access point: APs often use a BSSID one or
+/// two values off their LAN address.
+const AP_LAST_BYTE_GAP: u8 = 2;
 
 #[derive(Debug, Error, PartialEq)]
 pub enum ArpError {
@@ -412,6 +424,8 @@ pub struct Candidate {
     pub randomized_mac: bool,
     /// Answered ARP but no ping.
     pub no_icmp_reply: bool,
+    /// Whether this is the access point the laptop is associated with.
+    pub associated_ap: Option<ApMatch>,
 }
 
 impl From<&ProbeResult> for Candidate {
@@ -427,6 +441,7 @@ impl From<&ProbeResult> for Candidate {
             gateway: r.gateway,
             randomized_mac: r.mac.as_ref().is_some_and(is_randomized_mac),
             no_icmp_reply: r.ping.received == 0,
+            associated_ap: None,
         }
     }
 }
@@ -487,6 +502,154 @@ pub fn hosts_to_probe(subnet: &Subnet, own: Option<Ipv4Addr>) -> Vec<Ipv4Addr> {
     subnet.hosts().filter(|ip| Some(*ip) != own).collect()
 }
 
+// --------------------------------------------------------- access point
+
+/// How a LAN device was matched to the associated access point's BSSID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApMatch {
+    /// The LAN MAC is the BSSID.
+    Exact,
+    /// A near match: same first five bytes, the same address with the
+    /// locally administered bit flipped, or the same vendor prefix with a
+    /// last byte at most two apart.
+    Likely,
+}
+
+/// The LAN device that is (or likely is) the associated access point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AssociatedAp {
+    pub ip: Ipv4Addr,
+    pub mac: MacAddr,
+    pub bssid: MacAddr,
+    pub how: ApMatch,
+}
+
+/// How close `mac` is to `bssid`, smaller is better; `None` if unrelated.
+fn ap_closeness(bssid: &MacAddr, mac: &MacAddr) -> Option<(u8, u8)> {
+    let (b, m) = (bssid.0, mac.0);
+    let gap = b[5].abs_diff(m[5]);
+    if b == m {
+        Some((0, 0))
+    } else if b[..5] == m[..5] {
+        Some((1, gap))
+    } else if b[0] ^ m[0] == 0x02 && b[1..] == m[1..] {
+        Some((2, 0))
+    } else if b[..3] == m[..3] && gap <= AP_LAST_BYTE_GAP {
+        Some((3, gap))
+    } else {
+        None
+    }
+}
+
+/// Find the LAN device whose MAC matches `bssid`: an exact match if there is
+/// one, otherwise the closest near match (see [`ApMatch::Likely`]).
+pub fn match_access_point(
+    bssid: &MacAddr,
+    neighbours: &[(Ipv4Addr, MacAddr)],
+) -> Option<AssociatedAp> {
+    neighbours
+        .iter()
+        .filter_map(|(ip, mac)| Some((ap_closeness(bssid, mac)?, *ip, *mac)))
+        .min_by_key(|(closeness, ip, _)| (*closeness, *ip))
+        .map(|((rule, _), ip, mac)| AssociatedAp {
+            ip,
+            mac,
+            bssid: *bssid,
+            how: if rule == 0 {
+                ApMatch::Exact
+            } else {
+                ApMatch::Likely
+            },
+        })
+}
+
+/// The complete ARP entries of `iface`, as (IP, MAC) pairs.
+pub fn neighbours(arp: &[ArpEntry], iface: &str) -> Vec<(Ipv4Addr, MacAddr)> {
+    arp.iter()
+        .filter(|e| e.device == iface)
+        .filter_map(|e| Some((e.ip, e.mac?)))
+        .collect()
+}
+
+/// Tag the candidate that is the associated access point, if any.
+pub fn mark_associated_ap(candidates: &mut [Candidate], bssid: &MacAddr) -> Option<AssociatedAp> {
+    let pairs: Vec<(Ipv4Addr, MacAddr)> = candidates
+        .iter()
+        .filter_map(|c| Some((c.ip, c.mac?)))
+        .collect();
+    let ap = match_access_point(bssid, &pairs)?;
+    for c in candidates.iter_mut().filter(|c| c.ip == ap.ip) {
+        c.associated_ap = Some(ap.how);
+    }
+    Some(ap)
+}
+
+/// `associated AP: 192.168.1.2 (BSSID f4:fc:49:04:b2:b9, likely)`, or the
+/// BSSID alone when no LAN device matches it.
+pub fn describe_ap(link: &LinkInfo, ap: Option<&AssociatedAp>) -> String {
+    match ap {
+        Some(ap) => format!(
+            "associated AP: {} (BSSID {}{})",
+            ap.ip,
+            link.bssid,
+            if ap.how == ApMatch::Likely {
+                ", likely"
+            } else {
+                ""
+            }
+        ),
+        None => format!(
+            "associated AP: BSSID {}, not matched to a LAN address (run `wisense discover` \
+             to fill the ARP table)",
+            link.bssid
+        ),
+    }
+}
+
+/// A warning when the access point is not the gateway: the sensed path
+/// then runs to that device, and placement must be planned around it.
+pub fn ap_warning(ap: &AssociatedAp, gateway: Option<Ipv4Addr>) -> Option<String> {
+    let gateway = gateway?;
+    (ap.ip != gateway).then(|| {
+        format!(
+            "the laptop is associated with the access point at {} (BSSID {}{}), not with the \
+             router at the gateway {gateway}: the sensed radio path runs between the laptop and \
+             {}, so place them on opposite sides of the area to watch (README, Placement)",
+            ap.ip,
+            ap.bssid,
+            if ap.how == ApMatch::Likely {
+                ", likely"
+            } else {
+                ""
+            },
+            ap.ip
+        )
+    })
+}
+
+/// Best effort: the association of `iface` and the LAN device it maps to,
+/// from `iw` and `/proc/net/arp`. Problems are logged at debug level, since
+/// this only adds information.
+pub fn read_associated_ap(iface: &str) -> Option<(LinkInfo, Option<AssociatedAp>)> {
+    let link = match scan::associated_ap(iface) {
+        Ok(link) => link?,
+        Err(e) => {
+            tracing::debug!("associated access point unknown: {e:#}");
+            return None;
+        }
+    };
+    let arp = match read_arp(Path::new(ARP_PATH)) {
+        Ok(arp) => arp,
+        Err(e) => {
+            tracing::debug!("{e:#}");
+            Vec::new()
+        }
+    };
+    let ap = match_access_point(&link.bssid, &neighbours(&arp, iface));
+    Some((link, ap))
+}
+
 // ---------------------------------------------------------------- probing
 
 /// Settings of one discovery run.
@@ -505,6 +668,9 @@ pub struct Discovery {
     pub subnet: Subnet,
     pub gateway: Option<Ipv4Addr>,
     pub own_ip: Option<Ipv4Addr>,
+    /// The access point the laptop is associated with, if `iw` knows it and
+    /// a probed device matches its BSSID.
+    pub associated: Option<AssociatedAp>,
     /// Best first.
     pub candidates: Vec<Candidate>,
 }
@@ -554,11 +720,20 @@ pub async fn discover(opts: &DiscoverOptions) -> Result<Discovery> {
     // Read after probing: the pings made the kernel resolve every address.
     let arp = read_arp(Path::new(ARP_PATH))?;
     let results = merge_arp(probes, &arp, &opts.iface, gateway);
+    let mut candidates = rank_candidates(&results);
+    let associated = match scan::associated_ap(&opts.iface) {
+        Ok(link) => link.and_then(|l| mark_associated_ap(&mut candidates, &l.bssid)),
+        Err(e) => {
+            tracing::debug!("associated access point unknown: {e:#}");
+            None
+        }
+    };
     Ok(Discovery {
         subnet,
         gateway,
         own_ip,
-        candidates: rank_candidates(&results),
+        associated,
+        candidates,
     })
 }
 
@@ -651,6 +826,11 @@ pub fn tags(c: &Candidate) -> Vec<&'static str> {
     let mut tags = Vec::new();
     if c.gateway {
         tags.push("gateway");
+    }
+    match c.associated_ap {
+        Some(ApMatch::Exact) => tags.push("associated AP"),
+        Some(ApMatch::Likely) => tags.push("associated AP (likely)"),
+        None => {}
     }
     if c.randomized_mac {
         tags.push("randomized MAC");
@@ -1274,7 +1454,139 @@ rtt min/avg/max/mdev = a/b/c/d ms
         .unwrap();
         assert_eq!(
             json,
-            r#"{"rank":2,"ip":"192.168.1.23","mac":"76:62:94:1a:2b:3c","sent":4,"received":2,"response_rate":0.5,"median_rtt_ms":3.0,"jitter_ms":1.0,"gateway":false,"randomized_mac":true,"no_icmp_reply":false,"tags":["randomized MAC"]}"#
+            r#"{"rank":2,"ip":"192.168.1.23","mac":"76:62:94:1a:2b:3c","sent":4,"received":2,"response_rate":0.5,"median_rtt_ms":3.0,"jitter_ms":1.0,"gateway":false,"randomized_mac":true,"no_icmp_reply":false,"associated_ap":null,"tags":["randomized MAC"]}"#
         );
+    }
+
+    // ------------------------------------------------------- access point
+
+    fn pairs(list: &[(u8, &str)]) -> Vec<(Ipv4Addr, MacAddr)> {
+        list.iter()
+            .map(|(last, m)| (Ipv4Addr::new(192, 168, 1, *last), mac(m)))
+            .collect()
+    }
+
+    #[test]
+    fn exact_bssid_match_wins() {
+        let bssid = mac("f4:fc:49:04:b2:b9");
+        let lan = pairs(&[
+            (2, "f4:fc:49:04:b2:b8"),
+            (3, "f4:fc:49:04:b2:b9"),
+            (1, "38:91:48:82:7a:90"),
+        ]);
+        let ap = match_access_point(&bssid, &lan).unwrap();
+        assert_eq!(
+            (ap.ip, ap.how),
+            (Ipv4Addr::new(192, 168, 1, 3), ApMatch::Exact)
+        );
+    }
+
+    #[test]
+    fn near_bssid_matches_are_likely() {
+        let bssid = mac("f4:fc:49:04:b2:b9");
+        let ip = |last: u8| Ipv4Addr::new(192, 168, 1, last);
+        // One off in the last byte (a real mesh node's LAN MAC vs its BSSID).
+        let found =
+            |lan: &[(u8, &str)]| match_access_point(&bssid, &pairs(lan)).map(|a| (a.ip, a.how));
+        assert_eq!(
+            found(&[(2, "f4:fc:49:04:b2:b8"), (1, "38:91:48:82:7a:90")]),
+            Some((ip(2), ApMatch::Likely))
+        );
+        // Same first five bytes, far last byte.
+        assert_eq!(
+            found(&[(4, "f4:fc:49:04:b2:10")]),
+            Some((ip(4), ApMatch::Likely))
+        );
+        // The same address with the locally administered bit flipped.
+        assert_eq!(
+            found(&[(5, "f6:fc:49:04:b2:b9")]),
+            Some((ip(5), ApMatch::Likely))
+        );
+        // Same vendor, last byte two apart.
+        assert_eq!(
+            found(&[(6, "f4:fc:49:77:01:bb")]),
+            Some((ip(6), ApMatch::Likely))
+        );
+        // The closest near match wins.
+        assert_eq!(
+            found(&[(6, "f4:fc:49:77:01:bb"), (2, "f4:fc:49:04:b2:b8")]),
+            Some((ip(2), ApMatch::Likely))
+        );
+        // Same vendor but the last byte too far, or another vendor: no match.
+        assert_eq!(
+            found(&[(7, "f4:fc:49:77:01:c0"), (8, "38:91:48:04:b2:b9")]),
+            None
+        );
+        assert_eq!(found(&[]), None);
+    }
+
+    #[test]
+    fn marks_the_ap_among_candidates() {
+        let mut ranked = rank_candidates(&[
+            ProbeResult {
+                gateway: true,
+                ..probe(1, stats(5, &[3.0; 5], Some(0.5)), Some("38:91:48:82:7a:90"))
+            },
+            probe(2, stats(5, &[3.0; 5], Some(0.2)), Some("f4:fc:49:04:b2:b8")),
+            probe(9, stats(5, &[3.0; 5], Some(0.9)), None),
+        ]);
+        let ap = mark_associated_ap(&mut ranked, &mac("f4:fc:49:04:b2:b9")).unwrap();
+        assert_eq!(ap.ip, Ipv4Addr::new(192, 168, 1, 2));
+        let tagged: Vec<(u8, Option<ApMatch>)> = ranked
+            .iter()
+            .map(|c| (c.ip.octets()[3], c.associated_ap))
+            .collect();
+        assert_eq!(tagged, [(2, Some(ApMatch::Likely)), (1, None), (9, None)]);
+        assert_eq!(tags(&ranked[0]), ["associated AP (likely)"]);
+        assert_eq!(tags(&ranked[1]), ["gateway"]);
+        // No match: nothing tagged.
+        assert_eq!(
+            mark_associated_ap(&mut ranked[1..], &mac("00:11:22:33:44:55")),
+            None
+        );
+    }
+
+    #[test]
+    fn neighbours_are_complete_entries_of_the_interface() {
+        let arp: Vec<ArpEntry> = parse_arp(ARP).into_iter().map(Result::unwrap).collect();
+        let n = neighbours(&arp, "wlp2s0");
+        let ips: Vec<u8> = n.iter().map(|(ip, _)| ip.octets()[3]).collect();
+        assert_eq!(ips, [1, 23, 7]);
+    }
+
+    #[test]
+    fn warns_only_when_the_ap_is_not_the_gateway() {
+        let link = LinkInfo {
+            bssid: mac("f4:fc:49:04:b2:b9"),
+            ssid: None,
+            freq_mhz: None,
+        };
+        let ap = AssociatedAp {
+            ip: Ipv4Addr::new(192, 168, 1, 2),
+            mac: mac("f4:fc:49:04:b2:b8"),
+            bssid: link.bssid,
+            how: ApMatch::Likely,
+        };
+        assert_eq!(
+            describe_ap(&link, Some(&ap)),
+            "associated AP: 192.168.1.2 (BSSID f4:fc:49:04:b2:b9, likely)"
+        );
+        let exact = AssociatedAp {
+            how: ApMatch::Exact,
+            ..ap
+        };
+        assert_eq!(
+            describe_ap(&link, Some(&exact)),
+            "associated AP: 192.168.1.2 (BSSID f4:fc:49:04:b2:b9)"
+        );
+        assert!(describe_ap(&link, None)
+            .starts_with("associated AP: BSSID f4:fc:49:04:b2:b9, not matched"));
+
+        let warning = ap_warning(&ap, Some(Ipv4Addr::new(192, 168, 1, 1))).unwrap();
+        assert!(warning.contains("access point at 192.168.1.2"), "{warning}");
+        assert!(warning.contains("gateway 192.168.1.1"), "{warning}");
+        assert!(warning.contains("Placement"), "{warning}");
+        assert_eq!(ap_warning(&ap, Some(Ipv4Addr::new(192, 168, 1, 2))), None);
+        assert_eq!(ap_warning(&ap, None), None);
     }
 }
