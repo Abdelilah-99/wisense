@@ -1,4 +1,191 @@
-# The service stack is added in the infrastructure commit; this placeholder
-# lets CI validate the file from the start.
+# homeguard stack. Start with `docker compose up -d` after following the
+# "Quick start" section of README.md. Secrets come from .env (never committed).
+#
+# Network exposure, by design:
+#   LAN (HUB_LAN_IP)  homeguard dashboard (8080), Frigate UI (8971, login required),
+#                     Home Assistant UI (8123, `ha` profile only)
+#   loopback only     MQTT (1883) and the Frigate API (5000), for homeguard and
+#                     the wisense bridge, which run in the host network
+#   internal only     everything else (the Docker network "internal")
+# Profiles: `mqtt-lan` also exposes MQTT on the LAN; `ha` adds Home Assistant.
 name: homeguard
-services: {}
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+networks:
+  internal:
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0.22
+    restart: unless-stopped
+    networks: [internal]
+    # Loopback only: homeguard and the wisense bridge run in the host network.
+    ports:
+      - "127.0.0.1:1883:1883"
+    volumes:
+      - ./config/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./config/mosquitto/passwd:/mosquitto/config/passwd:ro
+      - ./data/mosquitto:/mosquitto/data
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 1883 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *logging
+
+  # Enabled with the `mqtt-lan` profile (COMPOSE_PROFILES=mqtt-lan in .env):
+  # forwards MQTT from the hub's LAN address to the broker, for devices such
+  # as ESP32 boards. Authentication still applies.
+  mosquitto-lan:
+    image: alpine/socat:1.8.1.3
+    profiles: [mqtt-lan]
+    restart: unless-stopped
+    networks: [internal]
+    command: ["TCP-LISTEN:1883,fork,reuseaddr", "TCP:mosquitto:1883"]
+    ports:
+      - "${HUB_LAN_IP:-127.0.0.1}:1883:1883"
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    logging: *logging
+
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:0.18.2
+    restart: unless-stopped
+    networks: [internal]
+    shm_size: "256mb"
+    environment:
+      TZ: ${TZ:-UTC}
+      FRIGATE_MQTT_USER: ${MQTT_FRIGATE_USER:-}
+      FRIGATE_MQTT_PASSWORD: ${MQTT_FRIGATE_PASSWORD:-}
+      FRIGATE_RTSP_USER: ${FRIGATE_RTSP_USER:-}
+      FRIGATE_RTSP_PASSWORD: ${FRIGATE_RTSP_PASSWORD:-}
+      FRIGATE_CAMERA_FRONT_HOST: ${FRIGATE_CAMERA_FRONT_HOST:-}
+    ports:
+      # Authenticated web UI on the LAN.
+      - "${HUB_LAN_IP:-127.0.0.1}:8971:8971"
+      # Unauthenticated API: loopback only, for homeguard's snapshots.
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - ./config/frigate:/config
+      - ./data/frigate:/media/frigate
+      - /etc/localtime:/etc/localtime:ro
+      - type: tmpfs
+        target: /tmp/cache
+        tmpfs:
+          size: 1000000000
+    # Hardware detectors (see config/frigate/config.yml):
+    # devices:
+    #   - /dev/bus/usb:/dev/bus/usb        # USB Coral
+    #   - /dev/apex_0:/dev/apex_0          # PCIe/M.2 Coral
+    #   - /dev/dri/renderD128:/dev/dri/renderD128   # Intel iGPU (OpenVINO, VAAPI)
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5000/api/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 3m
+    logging: *logging
+
+  zigbee2mqtt:
+    image: koenkk/zigbee2mqtt:2.14.2
+    restart: unless-stopped
+    networks: [internal]
+    environment:
+      TZ: ${TZ:-UTC}
+      ZIGBEE2MQTT_CONFIG_MQTT_USER: ${MQTT_Z2M_USER:-}
+      ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD: ${MQTT_Z2M_PASSWORD:-}
+      ZIGBEE2MQTT_CONFIG_FRONTEND_AUTH_TOKEN: ${Z2M_FRONTEND_TOKEN:-}
+    # Frontend for pairing, loopback only (reach it with an SSH tunnel:
+    # ssh -L 8081:127.0.0.1:8081 hub).
+    ports:
+      - "127.0.0.1:8081:8080"
+    volumes:
+      # scripts/init.sh copies config/zigbee2mqtt/configuration.yaml here;
+      # Zigbee2MQTT rewrites it (network key) and keeps its device database.
+      - ./data/zigbee2mqtt:/app/data
+      - /run/udev:/run/udev:ro
+    # USB coordinator passthrough. Find the stable path with
+    #   ls -l /dev/serial/by-id/
+    # then uncomment and replace the left-hand side, e.g.
+    #   /dev/serial/by-id/usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_...-if00-port0
+    # Until a dongle is attached Zigbee2MQTT exits and restarts; stop it with
+    # `docker compose stop zigbee2mqtt` if you have no Zigbee devices yet.
+    # devices:
+    #   - /dev/serial/by-id/usb-REPLACE-ME-if00-port0:/dev/ttyACM0
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 1m
+    logging: *logging
+
+  homeguard:
+    build: .
+    image: homeguard:local
+    restart: unless-stopped
+    # Host network: presence detection reads the hub's ARP table, which a
+    # bridged container cannot see. MQTT and the Frigate API are reached on
+    # loopback; the dashboard binds to HUB_LAN_IP only.
+    network_mode: host
+    user: "${HOMEGUARD_UID:-1000}:${HOMEGUARD_GID:-1000}"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-UTC}
+      HOMEGUARD_BIND: ${HUB_LAN_IP:-127.0.0.1}:8080
+    command: ["run", "--config", "/etc/homeguard/homeguard.toml"]
+    volumes:
+      - ./config/homeguard.toml:/etc/homeguard/homeguard.toml:ro
+      - ./data/homeguard:/var/lib/homeguard
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "homeguard", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *logging
+
+  # Optional: `COMPOSE_PROFILES=ha` in .env. In Home Assistant, add the MQTT
+  # integration with broker `mosquitto`, port 1883 and the MQTT_HA_* account.
+  # It stays on the internal network (no host network, so no LAN discovery)
+  # and only its web UI is published on the LAN.
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:2026.10.4
+    profiles: [ha]
+    restart: unless-stopped
+    networks: [internal]
+    ports:
+      - "${HUB_LAN_IP:-127.0.0.1}:8123:8123"
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./data/homeassistant:/config
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8123/manifest.json"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging: *logging

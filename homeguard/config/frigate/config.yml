@@ -1,0 +1,84 @@
+# Frigate 0.18 configuration for homeguard.
+# Values in {FRIGATE_...} come from environment variables set in .env and
+# passed by docker-compose.yml: no credential is ever written here.
+# Reference: https://docs.frigate.video/configuration/reference
+
+mqtt:
+  enabled: true
+  host: mosquitto
+  port: 1883
+  user: "{FRIGATE_MQTT_USER}"
+  password: "{FRIGATE_MQTT_PASSWORD}"
+  # homeguard reads frigate/events, frigate/available and
+  # frigate/<camera>/status/detect.
+
+# Keep Frigate's database with the recordings in ./data/frigate, not here.
+database:
+  path: /media/frigate/frigate.db
+
+detectors:
+  # Default: CPU. Works everywhere, but limits you to a few cameras at a low
+  # detection frame rate.
+  cpu:
+    type: cpu
+  # Google Coral (USB). Pass /dev/bus/usb through in docker-compose.yml and
+  # remove the cpu detector above.
+  # coral:
+  #   type: edgetpu
+  #   device: usb
+  # Intel iGPU with OpenVINO. Pass /dev/dri/renderD128 through, remove the cpu
+  # detector, and add the `model:` section from
+  # https://docs.frigate.video/configuration/object_detectors#openvino-detector
+  # ov:
+  #   type: openvino
+  #   device: GPU
+
+# homeguard only cares about people. Add labels (car, dog, ...) here if you
+# want Frigate to record them too; homeguard ignores them.
+objects:
+  track:
+    - person
+
+record:
+  enabled: true
+  # No continuous recording: only around tracked objects.
+  continuous:
+    days: 0
+  motion:
+    days: 0
+  # Keep event recordings (alerts and detections) for 7 days.
+  alerts:
+    retain:
+      days: 7
+      mode: motion
+  detections:
+    retain:
+      days: 7
+      mode: motion
+
+snapshots:
+  enabled: true
+  bound_box: true
+  retain:
+    default: 7
+
+cameras:
+  # ONE example camera. The id (front_door) is what homeguard.toml refers to.
+  # Replace the path with your camera's RTSP URL (see docs/hardware.md); put
+  # its address in FRIGATE_CAMERA_FRONT_HOST and its login in
+  # FRIGATE_RTSP_USER / FRIGATE_RTSP_PASSWORD in .env.
+  # Typical paths: Reolink /h264Preview_01_sub, Tapo /stream2,
+  # Dahua /cam/realmonitor?channel=1&subtype=1, Hikvision /Streaming/Channels/102.
+  front_door:
+    enabled: true
+    ffmpeg:
+      inputs:
+        - path: rtsp://{FRIGATE_RTSP_USER}:{FRIGATE_RTSP_PASSWORD}@{FRIGATE_CAMERA_FRONT_HOST}:554/stream2
+          roles:
+            - detect
+            - record
+    detect:
+      enabled: true
+      width: 1280
+      height: 720
+      fps: 5

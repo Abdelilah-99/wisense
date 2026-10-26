@@ -1,0 +1,44 @@
+# Zigbee2MQTT 2.x configuration template for homeguard.
+# scripts/init.sh copies it to data/zigbee2mqtt/configuration.yaml, which
+# Zigbee2MQTT then owns (it replaces GENERATE with a random network key and
+# adds paired devices). MQTT credentials and the frontend token come from
+# .env through ZIGBEE2MQTT_CONFIG_* variables in docker-compose.yml.
+
+homeassistant:
+  enabled: false
+
+# Never let new devices join by default. Zigbee2MQTT 2.x already starts with
+# joining closed (permit_join is no longer a setting there); enable joining
+# for a limited time from the frontend when pairing (README, "Pairing").
+permit_join: false
+
+mqtt:
+  base_topic: zigbee2mqtt
+  server: mqtt://mosquitto:1883
+  # user / password: from ZIGBEE2MQTT_CONFIG_MQTT_USER / _PASSWORD
+
+serial:
+  # The USB coordinator passed through in docker-compose.yml.
+  port: /dev/ttyACM0
+  # zstack for Sonoff ZBDongle-P (CC2652P); ember for ZBDongle-E (EFR32MG21).
+  adapter: zstack
+
+frontend:
+  enabled: true
+  port: 8080
+  # auth_token: from ZIGBEE2MQTT_CONFIG_FRONTEND_AUTH_TOKEN
+
+# Publishes zigbee2mqtt/<device>/availability, which homeguard uses to spot
+# sensors that went offline (possible tampering or a dead battery).
+availability:
+  enabled: true
+
+advanced:
+  network_key: GENERATE
+  pan_id: GENERATE
+  ext_pan_id: GENERATE
+  log_level: info
+  last_seen: ISO_8601
+
+# Name each device after pairing; homeguard.toml refers to these names.
+devices: {}

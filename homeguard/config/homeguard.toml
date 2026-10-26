@@ -1,0 +1,2 @@
+# homeguard configuration. The settings are documented as they are added;
+# see README.md. Secrets never go here: they come from .env.

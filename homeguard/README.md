@@ -65,7 +65,60 @@ The `homeguard` service is written in Rust and owns:
 
 ## Status
 
-Work in progress. Nothing works yet: this is the repository skeleton.
+Work in progress. The Docker Compose stack is in place; the `homeguard`
+service itself is still a placeholder.
+
+## Quick start
+
+On the hub (Linux with Docker Engine and the Compose plugin installed):
+
+```sh
+git clone https://github.com/Abdelilah-99/wisense.git
+cd wisense/homeguard
+cp .env.example .env
+$EDITOR .env              # replace every change-me, set HUB_LAN_IP
+scripts/init.sh           # data dirs, MQTT password file, Zigbee2MQTT config
+docker compose up -d
+docker compose ps         # every service should become "healthy"
+```
+
+Then:
+
+- the dashboard is at `http://HUB_LAN_IP:8080`;
+- the Frigate UI is at `https://HUB_LAN_IP:8971` (the first login password is
+  printed in `docker compose logs frigate`);
+- edit [config/frigate/config.yml](config/frigate/config.yml) for your
+  cameras and [config/homeguard.toml](config/homeguard.toml) for your sensors;
+- attach the Zigbee USB coordinator by uncommenting the `devices:` lines of
+  the `zigbee2mqtt` service.
+
+### What is exposed
+
+| Port | Bound to | Service |
+|---|---|---|
+| 8080 | `HUB_LAN_IP` | homeguard dashboard |
+| 8971 | `HUB_LAN_IP` | Frigate UI (login required) |
+| 1883 | loopback | MQTT, for homeguard and the wisense bridge on the host |
+| 5000 | loopback | Frigate API (no login), for homeguard's snapshots |
+| 8081 | loopback | Zigbee2MQTT frontend; use `ssh -L 8081:127.0.0.1:8081 hub` |
+| 1883 | `HUB_LAN_IP` | MQTT, only with the `mqtt-lan` profile |
+| 8123 | `HUB_LAN_IP` | Home Assistant, only with the `ha` profile |
+
+Optional services are Compose profiles, enabled in `.env` with
+`COMPOSE_PROFILES=mqtt-lan,ha`:
+
+- `mqtt-lan` exposes MQTT on the LAN (for ESP32 boards and other devices
+  elsewhere in the house). Logins are still required.
+- `ha` starts Home Assistant. Add an `MQTT_HA_USER` / `MQTT_HA_PASSWORD`
+  account in `.env`, re-run `scripts/mqtt-passwd.sh`, and point its MQTT
+  integration at broker `mosquitto`, port 1883.
+
+The `homeguard` container uses the host network because presence detection
+needs the hub's ARP table; it reaches MQTT and Frigate over loopback.
+
+MQTT never accepts anonymous clients. To change a password, edit `.env`, run
+`scripts/mqtt-passwd.sh`, then `docker compose restart mosquitto` and the
+services that use that account.
 
 ## Development
 

@@ -7,6 +7,6 @@ recordings/
 *.db-wal
 # Generated from .env by scripts/mqtt-passwd.sh; contains password hashes.
 config/mosquitto/passwd
-# Zigbee2MQTT writes its network key and device database here at runtime.
-config/zigbee2mqtt/*
-!config/zigbee2mqtt/configuration.yaml
+# Frigate writes caches and backups next to its config.
+config/frigate/*
+!config/frigate/config.yml

@@ -1,0 +1,8 @@
+target/
+data/
+recordings/
+.env
+*.db
+config/
+docs/
+scenarios/

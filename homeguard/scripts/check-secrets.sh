@@ -26,6 +26,8 @@ hits=$(grep_files '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' \
 
 # password/token/secret assignments whose value is not a placeholder.
 hits=$(grep_files '(password|passwd|token|secret|pin)[A-Z_]*["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9]' \
+  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(#|//)' \
+  | grep -vE ':(ro|rw)$' \
   | grep -viE 'change-?me|\$\{|\{FRIGATE_|<[a-z_ -]+>|example|placeholder|env::var|std::env|_env|secret_file|test|fn |let |\.rs:[0-9]+: *(//|///)' || true)
 [ -n "$hits" ] && fail "possible hard-coded password/token:"$'\n'"$hits"
 
