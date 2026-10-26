@@ -2,6 +2,9 @@
 
 mod config;
 mod detector;
+// Not used by a command yet: `wisense discover` comes in a later commit.
+#[allow(dead_code)]
+mod discover;
 mod output;
 mod record;
 mod sample;

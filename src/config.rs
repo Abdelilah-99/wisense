@@ -47,6 +47,10 @@ pub const DEFAULT_BAUD: u32 = 921_600;
 /// A new zone must stay on top this long before the zone switches.
 pub const DEFAULT_ZONE_HOLD_MS: u64 = 1000;
 
+/// `wisense discover` refuses subnets with a shorter prefix than this (more
+/// than 1022 hosts) unless `--allow-large-subnet` is given.
+pub const DEFAULT_MAX_SUBNET_PREFIX: u8 = 22;
+
 /// Which statistic of the windowed signal is used as the motion score.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

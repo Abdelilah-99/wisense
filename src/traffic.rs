@@ -38,6 +38,57 @@ pub fn parse_route_addr(hex: &str) -> Result<Ipv4Addr, RouteError> {
     Ok(Ipv4Addr::from(raw.to_ne_bytes()))
 }
 
+/// One row of `/proc/net/route`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route {
+    pub iface: String,
+    pub destination: Ipv4Addr,
+    pub gateway: Ipv4Addr,
+    pub flags: u16,
+    pub metric: u32,
+    pub mask: Ipv4Addr,
+}
+
+impl Route {
+    pub fn is_up(&self) -> bool {
+        self.flags & RTF_UP != 0
+    }
+
+    /// Reached through a gateway, as opposed to directly on the link.
+    pub fn via_gateway(&self) -> bool {
+        self.flags & RTF_GATEWAY != 0
+    }
+
+    /// Destination and mask 0, up, through a gateway.
+    pub fn is_default(&self) -> bool {
+        self.destination.is_unspecified()
+            && self.mask.is_unspecified()
+            && self.is_up()
+            && self.via_gateway()
+    }
+}
+
+/// Every well-formed row of a `/proc/net/route` table (the header and
+/// malformed rows are skipped).
+pub fn parse_routes(table: &str) -> Vec<Route> {
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            // Iface Destination Gateway Flags RefCnt Use Metric Mask ...
+            Some(Route {
+                iface: (*f.first()?).to_string(),
+                destination: parse_route_addr(f.get(1)?).ok()?,
+                gateway: parse_route_addr(f.get(2)?).ok()?,
+                flags: u16::from_str_radix(f.get(3)?, 16).ok()?,
+                metric: f.get(6)?.parse().ok()?,
+                mask: parse_route_addr(f.get(7)?).ok()?,
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefaultRoute {
     pub iface: String,
@@ -48,32 +99,13 @@ pub struct DefaultRoute {
 /// Default routes (destination and mask 0, gateway flag set) in a
 /// `/proc/net/route` table, lowest metric first.
 pub fn default_routes(table: &str) -> Vec<DefaultRoute> {
-    let mut routes: Vec<DefaultRoute> = table
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let f: Vec<&str> = line.split_whitespace().collect();
-            // Iface Destination Gateway Flags RefCnt Use Metric Mask ...
-            let (iface, dest, gw, flags, metric, mask) = (
-                f.first()?,
-                f.get(1)?,
-                f.get(2)?,
-                f.get(3)?,
-                f.get(6)?,
-                f.get(7)?,
-            );
-            let flags = u16::from_str_radix(flags, 16).ok()?;
-            let is_default = *dest == "00000000"
-                && *mask == "00000000"
-                && flags & (RTF_UP | RTF_GATEWAY) == RTF_UP | RTF_GATEWAY;
-            if !is_default {
-                return None;
-            }
-            Some(DefaultRoute {
-                iface: (*iface).to_string(),
-                gateway: parse_route_addr(gw).ok()?,
-                metric: metric.parse().ok()?,
-            })
+    let mut routes: Vec<DefaultRoute> = parse_routes(table)
+        .into_iter()
+        .filter(Route::is_default)
+        .map(|r| DefaultRoute {
+            iface: r.iface,
+            gateway: r.gateway,
+            metric: r.metric,
         })
         .collect();
     routes.sort_by_key(|r| r.metric);
@@ -244,6 +276,24 @@ mod tests {
         );
         assert_eq!(gateway_for(TABLE, "wlan9"), None);
         assert_eq!(gateway_for("Iface\tDestination\n", "wlp2s0"), None);
+    }
+
+    #[test]
+    #[cfg(target_endian = "little")]
+    fn parses_every_route_row() {
+        let routes = parse_routes(TABLE);
+        assert_eq!(routes.len(), 4);
+        assert!(routes[1].is_default());
+        // The WiFi subnet itself: up, on the link, not a default route.
+        let subnet = &routes[3];
+        assert_eq!(subnet.iface, "wlp2s0");
+        assert_eq!(subnet.destination, Ipv4Addr::new(192, 168, 1, 0));
+        assert_eq!(subnet.mask, Ipv4Addr::new(255, 255, 255, 0));
+        assert_eq!(subnet.metric, 600);
+        assert!(subnet.is_up() && !subnet.via_gateway() && !subnet.is_default());
+        // Malformed rows are skipped, not fatal.
+        assert!(parse_routes("Iface\tDestination\nwlp2s0\tZZ\n").is_empty());
+        assert!(parse_routes("Iface\tDestination\nwlp2s0 0001A8C0 00000000 0001 0 0\n").is_empty());
     }
 
     #[test]
