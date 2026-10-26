@@ -1,0 +1,38 @@
+[package]
+name = "wisense"
+version = "0.1.0"
+edition = "2021"
+description = "Detect human motion from WiFi signal fluctuations (laptop RSSI, ESP32 CSI)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = []
+# Read RSSI through nl80211 (NL80211_CMD_GET_STATION) instead of /proc.
+nl80211 = ["dep:wl-nl80211", "dep:futures-util"]
+# ESP32 boards running ESP32-CSI-Tool, over USB serial.
+esp32 = ["dep:serialport"]
+# Live terminal dashboard (`monitor --tui`).
+tui = ["dep:ratatui"]
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
+csv = "1"
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "std"] }
+
+# Optional, per feature.
+futures-util = { version = "0.3", optional = true }
+# ratatui re-exports the matching crossterm version (`ratatui::crossterm`).
+ratatui = { version = "0.30", optional = true, default-features = false, features = ["crossterm"] }
+# No udev: opening a port doesn't need it, and it avoids libudev-dev.
+serialport = { version = "4", optional = true, default-features = false }
+wl-nl80211 = { version = "0.8", optional = true }
