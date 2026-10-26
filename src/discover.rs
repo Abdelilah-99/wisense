@@ -5,12 +5,25 @@
 //! - `/proc/net/arp`: the kernel's neighbour table (IP address -> MAC);
 //! - `/proc/net/route`: the WiFi subnet is the interface's directly connected
 //!   route (destination + mask), parsed with [`traffic::parse_routes`];
-//! - MAC addresses, including whether one is a randomized "private" address.
+//! - MAC addresses, including whether one is a randomized "private" address;
+//! - `ping`'s output, and the ranking of the hosts that answered.
+//!
+//! Probing spawns one `ping` per address (at most `concurrency` at a time,
+//! killed if wisense stops), then reads the ARP table again: a device that
+//! ignores pings still had to answer ARP, so it shows up as "no ICMP reply".
 
+use std::cmp::Ordering;
 use std::fmt;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::Arc;
 
+use anyhow::{anyhow, bail, Context, Result};
 use thiserror::Error;
+use tokio::process::Command;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::config;
 use crate::traffic::{self, Route};
@@ -227,6 +240,401 @@ pub fn subnet_for(table: &str, iface: &str) -> Option<Subnet> {
 /// [`Subnet::check_size`] with the default limit.
 pub fn check_subnet_size(subnet: &Subnet, allow_large: bool) -> Result<(), SubnetError> {
     subnet.check_size(config::DEFAULT_MAX_SUBNET_PREFIX, allow_large)
+}
+
+// ------------------------------------------------------------------- ping
+
+#[derive(Debug, Error, PartialEq)]
+pub enum PingParseError {
+    #[error("no \"packets transmitted\" summary in ping's output")]
+    NoSummary,
+    #[error("malformed ping summary {0:?}")]
+    BadSummary(String),
+}
+
+/// What one `ping -c N` run measured.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PingStats {
+    pub sent: u32,
+    pub received: u32,
+    /// Round-trip time of each reply in ms, duplicates excluded.
+    pub rtts_ms: Vec<f64>,
+    /// ping's `mdev`: the standard deviation of the round-trip times.
+    pub mdev_ms: Option<f64>,
+}
+
+impl PingStats {
+    /// Replies per request, 0 to 1.
+    pub fn response_rate(&self) -> f64 {
+        if self.sent == 0 {
+            return 0.0;
+        }
+        f64::from(self.received.min(self.sent)) / f64::from(self.sent)
+    }
+
+    pub fn median_ms(&self) -> Option<f64> {
+        median(&self.rtts_ms)
+    }
+
+    /// How much the round-trip time varies: ping's `mdev`, or the standard
+    /// deviation of the replies if ping printed no `rtt` line.
+    pub fn jitter_ms(&self) -> Option<f64> {
+        self.mdev_ms.or_else(|| population_std(&self.rtts_ms))
+    }
+}
+
+fn median(values: &[f64]) -> Option<f64> {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let mid = sorted.len() / 2;
+    match sorted.len() {
+        0 => None,
+        n if n % 2 == 1 => sorted.get(mid).copied(),
+        _ => Some((sorted.get(mid - 1)? + sorted.get(mid)?) / 2.0),
+    }
+}
+
+fn population_std(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let n = values.len() as f64;
+    let mean = values.iter().sum::<f64>() / n;
+    Some((values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n).sqrt())
+}
+
+/// Parse the output of `ping -c N -n <ip>` (iputils; BusyBox's wording is
+/// accepted too):
+///
+/// ```text
+/// 64 bytes from 192.168.1.1: icmp_seq=1 ttl=64 time=4.78 ms
+/// ...
+/// 3 packets transmitted, 3 received, 0% packet loss, time 2003ms
+/// rtt min/avg/max/mdev = 4.784/4.914/5.068/0.117 ms
+/// ```
+///
+/// With no reply there is no `rtt` line. Never panics, whatever the input.
+pub fn parse_ping_output(text: &str) -> Result<PingStats, PingParseError> {
+    let summary = text
+        .lines()
+        .find(|l| l.contains("packets transmitted"))
+        .ok_or(PingParseError::NoSummary)?;
+    let bad = || PingParseError::BadSummary(summary.trim().to_string());
+    // "5 packets transmitted, 3 received, +2 duplicates, 40% packet loss, ..."
+    let count = |part: Option<&str>, word: &str| -> Option<u32> {
+        let (n, rest) = part?.trim().split_once(' ')?;
+        rest.ends_with(word).then(|| n.parse().ok()).flatten()
+    };
+    let mut parts = summary.split(',');
+    let sent = count(parts.next(), "transmitted").ok_or_else(bad)?;
+    let received = count(parts.next(), "received").ok_or_else(bad)?;
+    let rtts_ms = text
+        .lines()
+        .filter(|l| l.contains(" bytes from ") && !l.contains("DUP!"))
+        .filter_map(reply_time_ms)
+        .collect();
+    Ok(PingStats {
+        sent,
+        received,
+        rtts_ms,
+        mdev_ms: text.lines().find_map(rtt_mdev_ms),
+    })
+}
+
+/// `time=4.78 ms` in a reply line.
+fn reply_time_ms(line: &str) -> Option<f64> {
+    let value = line.split_once("time=")?.1.split_whitespace().next()?;
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+/// The `mdev` of `rtt min/avg/max/mdev = 4.784/4.914/5.068/0.117 ms`.
+fn rtt_mdev_ms(line: &str) -> Option<f64> {
+    let line = line.trim();
+    if !(line.starts_with("rtt ") || line.starts_with("round-trip ")) {
+        return None;
+    }
+    let (names, values) = line.split_once('=')?;
+    let names = names.split_whitespace().last()?;
+    let index = names.split('/').position(|n| n == "mdev")?;
+    let value = values.split_whitespace().next()?.split('/').nth(index)?;
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+/// `ping` arguments for probing one host: `count` requests, waiting at most
+/// `timeout_s` for each reply, numeric output.
+pub fn probe_args(ip: Ipv4Addr, count: u32, timeout_s: f64) -> Vec<String> {
+    vec![
+        "-c".to_string(),
+        count.to_string(),
+        "-W".to_string(),
+        format!("{timeout_s}"),
+        "-n".to_string(),
+        ip.to_string(),
+    ]
+}
+
+// ---------------------------------------------------------------- ranking
+
+/// One probed host, with what the ARP table knows about it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProbeResult {
+    pub ip: Ipv4Addr,
+    pub ping: PingStats,
+    /// From the ARP table, if the host answered ARP.
+    pub mac: Option<MacAddr>,
+    pub gateway: bool,
+}
+
+/// A device as `wisense discover` reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Candidate {
+    pub ip: Ipv4Addr,
+    pub mac: Option<MacAddr>,
+    pub sent: u32,
+    pub received: u32,
+    pub response_rate: f64,
+    pub median_rtt_ms: Option<f64>,
+    pub jitter_ms: Option<f64>,
+    pub gateway: bool,
+    pub randomized_mac: bool,
+    /// Answered ARP but no ping.
+    pub no_icmp_reply: bool,
+}
+
+impl From<&ProbeResult> for Candidate {
+    fn from(r: &ProbeResult) -> Self {
+        Self {
+            ip: r.ip,
+            mac: r.mac,
+            sent: r.ping.sent,
+            received: r.ping.received,
+            response_rate: r.ping.response_rate(),
+            median_rtt_ms: r.ping.median_ms(),
+            jitter_ms: r.ping.jitter_ms(),
+            gateway: r.gateway,
+            randomized_mac: r.mac.as_ref().is_some_and(is_randomized_mac),
+            no_icmp_reply: r.ping.received == 0,
+        }
+    }
+}
+
+/// Join ping results with the ARP table of `iface`. Hosts that answered
+/// neither ping nor ARP are dropped: nothing is there.
+pub fn merge_arp(
+    probes: Vec<(Ipv4Addr, PingStats)>,
+    arp: &[ArpEntry],
+    iface: &str,
+    gateway: Option<Ipv4Addr>,
+) -> Vec<ProbeResult> {
+    probes
+        .into_iter()
+        .filter_map(|(ip, ping)| {
+            let mac = arp
+                .iter()
+                .find(|e| e.ip == ip && e.device == iface)
+                .and_then(|e| e.mac);
+            (ping.received > 0 || mac.is_some()).then_some(ProbeResult {
+                ip,
+                ping,
+                mac,
+                gateway: gateway == Some(ip),
+            })
+        })
+        .collect()
+}
+
+/// Best keepalive targets first: the highest response rate, then the
+/// steadiest round-trip time (lowest jitter), then the lowest median RTT.
+/// Reliability comes before speed: a target only has to keep frames
+/// flowing, and a fast host that drops replies leaves gaps.
+pub fn rank_candidates(results: &[ProbeResult]) -> Vec<Candidate> {
+    let mut ranked: Vec<Candidate> = results.iter().map(Candidate::from).collect();
+    ranked.sort_by(|a, b| {
+        b.response_rate
+            .total_cmp(&a.response_rate)
+            .then_with(|| missing_last(a.jitter_ms, b.jitter_ms))
+            .then_with(|| missing_last(a.median_rtt_ms, b.median_rtt_ms))
+            .then_with(|| a.ip.cmp(&b.ip))
+    });
+    ranked
+}
+
+/// Ascending, with `None` after every value.
+fn missing_last(a: Option<f64>, b: Option<f64>) -> Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => a.total_cmp(&b),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// Every host of `subnet` except the laptop's own address.
+pub fn hosts_to_probe(subnet: &Subnet, own: Option<Ipv4Addr>) -> Vec<Ipv4Addr> {
+    subnet.hosts().filter(|ip| Some(*ip) != own).collect()
+}
+
+// ---------------------------------------------------------------- probing
+
+/// Settings of one discovery run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoverOptions {
+    pub iface: String,
+    pub count: u32,
+    pub timeout_s: f64,
+    pub concurrency: usize,
+    pub allow_large_subnet: bool,
+}
+
+/// The result of [`discover`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Discovery {
+    pub subnet: Subnet,
+    pub gateway: Option<Ipv4Addr>,
+    pub own_ip: Option<Ipv4Addr>,
+    /// Best first.
+    pub candidates: Vec<Candidate>,
+}
+
+/// Find and rank the devices on the WiFi subnet of `opts.iface`.
+pub async fn discover(opts: &DiscoverOptions) -> Result<Discovery> {
+    if opts.count == 0 {
+        bail!("--count must be at least 1");
+    }
+    if !(opts.timeout_s.is_finite() && opts.timeout_s > 0.0) {
+        bail!("--timeout must be a positive number of seconds");
+    }
+    if opts.concurrency == 0 {
+        bail!("--concurrency must be at least 1");
+    }
+    let routes = std::fs::read_to_string(traffic::ROUTE_PATH)
+        .with_context(|| format!("reading {}", traffic::ROUTE_PATH))?;
+    let subnet = subnet_for(&routes, &opts.iface).with_context(|| {
+        format!(
+            "no local subnet route on {} in {}; is it connected?",
+            opts.iface,
+            traffic::ROUTE_PATH
+        )
+    })?;
+    check_subnet_size(&subnet, opts.allow_large_subnet)?;
+    let gateway = traffic::gateway_for(&routes, &opts.iface);
+    let own_ip = match local_ip_towards(gateway.or_else(|| subnet.hosts().next())) {
+        Ok(ip) => ip.filter(|ip| subnet.contains(*ip)),
+        Err(e) => {
+            tracing::warn!("{e:#}; the laptop's own address may be probed too");
+            None
+        }
+    };
+
+    let hosts = hosts_to_probe(&subnet, own_ip);
+    let rounds = hosts.len().div_ceil(opts.concurrency) as f64;
+    tracing::info!(
+        "probing {} addresses in {subnet} on {} ({} pings each, {} at a time); this takes \
+         about {:.0} s",
+        hosts.len(),
+        opts.iface,
+        opts.count,
+        opts.concurrency,
+        rounds * (f64::from(opts.count - 1) + opts.timeout_s)
+    );
+    let probes = probe_hosts(hosts, opts.count, opts.timeout_s, opts.concurrency).await?;
+    // Read after probing: the pings made the kernel resolve every address.
+    let arp = read_arp(Path::new(ARP_PATH))?;
+    let results = merge_arp(probes, &arp, &opts.iface, gateway);
+    Ok(Discovery {
+        subnet,
+        gateway,
+        own_ip,
+        candidates: rank_candidates(&results),
+    })
+}
+
+/// Read and parse `/proc/net/arp`, warning about malformed lines.
+pub fn read_arp(path: &Path) -> Result<Vec<ArpEntry>> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut entries = Vec::new();
+    for entry in parse_arp(&text) {
+        match entry {
+            Ok(e) => entries.push(e),
+            Err(e) => tracing::warn!("{e}"),
+        }
+    }
+    Ok(entries)
+}
+
+/// The laptop's own address on the route to `target`. Connecting a UDP
+/// socket sends nothing; the kernel only picks the route and source address.
+fn local_ip_towards(target: Option<Ipv4Addr>) -> Result<Option<Ipv4Addr>> {
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).context("opening a UDP socket")?;
+    socket
+        .connect((target, 9))
+        .with_context(|| format!("finding the laptop's address towards {target}"))?;
+    match socket
+        .local_addr()
+        .context("reading the local address")?
+        .ip()
+    {
+        IpAddr::V4(ip) => Ok(Some(ip)),
+        IpAddr::V6(_) => Ok(None),
+    }
+}
+
+/// Ping every host, at most `concurrency` at a time. The first failure to
+/// run `ping` stops the probe; the remaining children are killed.
+pub async fn probe_hosts(
+    hosts: Vec<Ipv4Addr>,
+    count: u32,
+    timeout_s: f64,
+    concurrency: usize,
+) -> Result<Vec<(Ipv4Addr, PingStats)>> {
+    let permits = Arc::new(Semaphore::new(concurrency));
+    let mut tasks = JoinSet::new();
+    for ip in hosts {
+        let permits = Arc::clone(&permits);
+        tasks.spawn(async move {
+            let _permit = permits
+                .acquire_owned()
+                .await
+                .context("probe limiter closed")?;
+            ping_host(ip, count, timeout_s).await.map(|s| (ip, s))
+        });
+    }
+    let mut results = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        let probe = joined.map_err(|e| anyhow!("a probe task failed: {e}"))??;
+        results.push(probe);
+    }
+    results.sort_by_key(|(ip, _)| *ip);
+    Ok(results)
+}
+
+/// Ping one host `count` times. ping exits 1 when nothing answered; that is
+/// a result here (0 received), not an error.
+async fn ping_host(ip: Ipv4Addr, count: u32, timeout_s: f64) -> Result<PingStats> {
+    let output = Command::new("ping")
+        .args(probe_args(ip, count, timeout_s))
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("running `ping` (is iputils-ping installed?)")?;
+    parse_ping_output(&String::from_utf8_lossy(&output.stdout)).with_context(|| {
+        format!(
+            "ping {ip} ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -493,5 +901,266 @@ IP address       HW type     Flags       HW address            Mask     Device
             .to_string();
         assert!(err.contains("10.0.0.0/16 has 65536 addresses"), "{err}");
         assert!(err.contains("--allow-large-subnet"), "{err}");
+    }
+
+    // --------------------------------------------------------------- ping
+
+    /// Real iputils 20240905 output (`ping -c 3 -W 1 -n 192.168.1.1`).
+    const PING_OK: &str = "\
+PING 192.168.1.1 (192.168.1.1) 56(84) bytes of data.
+64 bytes from 192.168.1.1: icmp_seq=1 ttl=64 time=4.78 ms
+64 bytes from 192.168.1.1: icmp_seq=2 ttl=64 time=4.89 ms
+64 bytes from 192.168.1.1: icmp_seq=3 ttl=64 time=5.07 ms
+
+--- 192.168.1.1 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2003ms
+rtt min/avg/max/mdev = 4.784/4.914/5.068/0.117 ms
+";
+
+    /// Real output for an address nobody answers.
+    const PING_LOST: &str = "\
+PING 192.168.1.253 (192.168.1.253) 56(84) bytes of data.
+
+--- 192.168.1.253 ping statistics ---
+2 packets transmitted, 0 received, 100% packet loss, time 1035ms
+
+";
+
+    #[test]
+    fn parses_a_normal_ping_run() {
+        let stats = parse_ping_output(PING_OK).unwrap();
+        assert_eq!(
+            stats,
+            PingStats {
+                sent: 3,
+                received: 3,
+                rtts_ms: vec![4.78, 4.89, 5.07],
+                mdev_ms: Some(0.117),
+            }
+        );
+        assert_eq!(stats.response_rate(), 1.0);
+        assert_eq!(stats.median_ms(), Some(4.89));
+        assert_eq!(stats.jitter_ms(), Some(0.117));
+    }
+
+    #[test]
+    fn parses_total_loss() {
+        let stats = parse_ping_output(PING_LOST).unwrap();
+        assert_eq!((stats.sent, stats.received), (2, 0));
+        assert_eq!(stats.response_rate(), 0.0);
+        assert_eq!(stats.median_ms(), None);
+        assert_eq!(stats.jitter_ms(), None);
+        // Unreachable errors and their counter don't confuse it.
+        let errors = "\
+From 192.168.1.50 icmp_seq=1 Destination Host Unreachable
+--- 192.168.1.99 ping statistics ---
+5 packets transmitted, 0 received, +3 errors, 100% packet loss, time 4085ms
+";
+        let stats = parse_ping_output(errors).unwrap();
+        assert_eq!((stats.sent, stats.received), (5, 0));
+        assert!(stats.rtts_ms.is_empty());
+    }
+
+    #[test]
+    fn partial_loss_duplicates_and_busybox() {
+        let text = "\
+64 bytes from 10.0.0.2: icmp_seq=1 ttl=64 time=12.0 ms
+64 bytes from 10.0.0.2: icmp_seq=1 ttl=64 time=13.0 ms (DUP!)
+64 bytes from 10.0.0.2: icmp_seq=3 ttl=64 time=2.0 ms
+--- 10.0.0.2 ping statistics ---
+4 packets transmitted, 2 received, +1 duplicates, 50% packet loss, time 3004ms
+rtt min/avg/max/mdev = 2.000/7.000/12.000/5.000 ms
+";
+        let stats = parse_ping_output(text).unwrap();
+        assert_eq!((stats.sent, stats.received), (4, 2));
+        assert_eq!(stats.rtts_ms, vec![12.0, 2.0]);
+        assert_eq!(stats.response_rate(), 0.5);
+        assert_eq!(stats.median_ms(), Some(7.0));
+        assert_eq!(stats.jitter_ms(), Some(5.0));
+
+        // BusyBox: "packets received", "round-trip" and no mdev; the jitter
+        // then comes from the replies themselves.
+        let busybox = "\
+64 bytes from 10.0.0.3: seq=0 ttl=64 time=1.000 ms
+64 bytes from 10.0.0.3: seq=1 ttl=64 time=3.000 ms
+--- 10.0.0.3 ping statistics ---
+2 packets transmitted, 2 packets received, 0% packet loss
+round-trip min/avg/max = 1.000/2.000/3.000 ms
+";
+        let stats = parse_ping_output(busybox).unwrap();
+        assert_eq!((stats.sent, stats.received), (2, 2));
+        assert_eq!(stats.mdev_ms, None);
+        assert_eq!(stats.jitter_ms(), Some(1.0));
+        assert_eq!(stats.median_ms(), Some(2.0));
+    }
+
+    #[test]
+    fn garbage_ping_output() {
+        assert_eq!(parse_ping_output(""), Err(PingParseError::NoSummary));
+        assert_eq!(
+            parse_ping_output("ping: connect: Network is unreachable\n"),
+            Err(PingParseError::NoSummary)
+        );
+        for summary in [
+            "x packets transmitted, 3 received",
+            "3 packets transmitted",
+            "3 packets transmitted, many received",
+            "3 packets transmitted, 3 lost",
+        ] {
+            assert_eq!(
+                parse_ping_output(summary),
+                Err(PingParseError::BadSummary(summary.into())),
+                "{summary}"
+            );
+        }
+        // Unparsable reply times and rtt values are ignored, not fatal.
+        let odd = "\
+64 bytes from 10.0.0.2: icmp_seq=1 ttl=64 time=fast ms
+1 packets transmitted, 1 received, 0% packet loss
+rtt min/avg/max/mdev = a/b/c/d ms
+";
+        let stats = parse_ping_output(odd).unwrap();
+        assert!(stats.rtts_ms.is_empty());
+        assert_eq!(stats.mdev_ms, None);
+
+        let mut rng = crate::source::synthetic::Rng::new(11);
+        for _ in 0..2000 {
+            let mut bytes = PING_OK.as_bytes().to_vec();
+            for _ in 0..3 {
+                let i = (rng.next_u64() as usize) % bytes.len();
+                bytes[i] = (rng.next_u64() & 0xff) as u8;
+            }
+            bytes.truncate((rng.next_u64() as usize) % (bytes.len() + 1));
+            let _ = parse_ping_output(&String::from_utf8_lossy(&bytes));
+        }
+    }
+
+    #[test]
+    fn median_and_spread() {
+        assert_eq!(median(&[]), None);
+        assert_eq!(median(&[3.0]), Some(3.0));
+        assert_eq!(median(&[9.0, 1.0, 5.0]), Some(5.0));
+        assert_eq!(median(&[4.0, 1.0, 3.0, 2.0]), Some(2.5));
+        assert_eq!(population_std(&[]), None);
+        assert_eq!(population_std(&[7.0]), Some(0.0));
+        assert_eq!(
+            population_std(&[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]),
+            Some(2.0)
+        );
+    }
+
+    #[test]
+    fn probe_arguments() {
+        assert_eq!(
+            probe_args(Ipv4Addr::new(192, 168, 1, 7), 5, 1.0),
+            ["-c", "5", "-W", "1", "-n", "192.168.1.7"]
+        );
+        assert_eq!(
+            probe_args(Ipv4Addr::new(10, 0, 0, 2), 3, 0.5),
+            ["-c", "3", "-W", "0.5", "-n", "10.0.0.2"]
+        );
+    }
+
+    // ------------------------------------------------------------ ranking
+
+    fn stats(sent: u32, rtts: &[f64], mdev: Option<f64>) -> PingStats {
+        PingStats {
+            sent,
+            received: u32::try_from(rtts.len()).unwrap(),
+            rtts_ms: rtts.to_vec(),
+            mdev_ms: mdev,
+        }
+    }
+
+    fn probe(last: u8, ping: PingStats, mac: Option<&str>) -> ProbeResult {
+        ProbeResult {
+            ip: Ipv4Addr::new(192, 168, 1, last),
+            ping,
+            mac: mac.map(super::tests::mac),
+            gateway: false,
+        }
+    }
+
+    fn order(ranked: &[Candidate]) -> Vec<u8> {
+        ranked.iter().map(|c| c.ip.octets()[3]).collect()
+    }
+
+    #[test]
+    fn reliable_beats_fast_but_flaky() {
+        let fast_flaky = probe(10, stats(5, &[1.0, 1.1, 0.9], Some(0.1)), None);
+        let reliable = probe(20, stats(5, &[4.0, 4.2, 3.9, 4.1, 4.0], Some(0.1)), None);
+        assert_eq!(order(&rank_candidates(&[fast_flaky, reliable])), [20, 10]);
+    }
+
+    #[test]
+    fn steadier_then_faster_breaks_ties() {
+        let jittery = probe(1, stats(5, &[2.0; 5], Some(3.0)), None);
+        let steady_slow = probe(2, stats(5, &[9.0; 5], Some(0.2)), None);
+        let steady_fast = probe(3, stats(5, &[3.0; 5], Some(0.2)), None);
+        let ranked = rank_candidates(&[jittery, steady_slow, steady_fast]);
+        assert_eq!(order(&ranked), [3, 2, 1]);
+        assert_eq!(ranked[0].median_rtt_ms, Some(3.0));
+        assert_eq!(ranked[0].jitter_ms, Some(0.2));
+        assert_eq!(ranked[0].response_rate, 1.0);
+    }
+
+    #[test]
+    fn no_icmp_reply_ranks_last_and_flags_are_set() {
+        let silent = probe(5, stats(5, &[], None), Some("38:91:48:aa:bb:cc"));
+        let phone = probe(
+            9,
+            stats(5, &[30.0; 5], Some(9.0)),
+            Some("76:62:94:1a:2b:3c"),
+        );
+        let ranked = rank_candidates(&[silent, phone]);
+        assert_eq!(order(&ranked), [9, 5]);
+        assert!(ranked[0].randomized_mac && !ranked[0].no_icmp_reply);
+        assert!(!ranked[1].randomized_mac && ranked[1].no_icmp_reply);
+        assert_eq!(ranked[1].median_rtt_ms, None);
+    }
+
+    #[test]
+    #[cfg(target_endian = "little")]
+    fn merges_arp_and_marks_the_gateway() {
+        let arp: Vec<ArpEntry> = parse_arp(ARP).into_iter().map(Result::unwrap).collect();
+        let ip = |last: u8| Ipv4Addr::new(192, 168, 1, last);
+        let probes = vec![
+            (ip(1), stats(5, &[3.0; 5], Some(0.1))),
+            // Ignores ping, but answered ARP: kept.
+            (ip(7), stats(5, &[], None)),
+            // Ignores ping and ARP is incomplete: nobody there.
+            (ip(40), stats(5, &[], None)),
+            // Not in the ARP table at all.
+            (ip(99), stats(5, &[], None)),
+            // Answers ping; its ARP entry is on another interface.
+            (ip(23), stats(5, &[8.0; 5], Some(1.0))),
+        ];
+        let results = merge_arp(probes, &arp, "wlp2s0", Some(ip(1)));
+        let ips: Vec<u8> = results.iter().map(|r| r.ip.octets()[3]).collect();
+        assert_eq!(ips, [1, 7, 23]);
+        assert!(results[0].gateway && !results[1].gateway);
+        assert_eq!(results[0].mac, Some(mac("f4:fc:49:04:b2:b9")));
+        assert_eq!(results[1].mac, Some(mac("38:91:48:aa:bb:cc")));
+        assert_eq!(results[2].mac, Some(mac("76:62:94:1a:2b:3c")));
+        let other_iface = merge_arp(
+            vec![(ip(23), stats(5, &[8.0; 5], None))],
+            &arp,
+            "eth0",
+            None,
+        );
+        assert_eq!(other_iface[0].mac, None);
+    }
+
+    #[test]
+    fn own_address_is_not_probed() {
+        let subnet = Subnet {
+            network: Ipv4Addr::new(192, 168, 1, 0),
+            prefix: 29,
+        };
+        let own = Ipv4Addr::new(192, 168, 1, 4);
+        let hosts = hosts_to_probe(&subnet, Some(own));
+        assert_eq!(hosts.len(), 5);
+        assert!(!hosts.contains(&own));
+        assert_eq!(hosts_to_probe(&subnet, None).len(), 6);
     }
 }
