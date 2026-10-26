@@ -49,6 +49,7 @@ This README is both the manual and a study guide:
 - [Appendix — Measured on this laptop](#appendix--measured-on-this-laptop)
 - [Glossary](#glossary)
 - [Ethics](#ethics)
+- [License](#license)
 
 ---
 
@@ -1464,3 +1465,20 @@ Further exercises:
 wisense senses radio signals in the space around your own WiFi. Only run it
 on your own network and in your own home, or where everyone affected knows
 and agrees. Do not use it to monitor people without their knowledge.
+
+# License
+
+Copyright 2026 Abdelilah Bouchikhi.
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.

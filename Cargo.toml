@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Detect human motion from WiFi signal fluctuations (laptop RSSI, ESP32 CSI)"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/Abdelilah-99/wisense"
+readme = "README.md"
+keywords = ["wifi", "motion-detection", "rssi", "csi", "esp32"]
+categories = ["command-line-utilities", "hardware-support"]
 publish = false
 
 [features]
