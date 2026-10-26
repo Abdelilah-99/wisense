@@ -65,8 +65,8 @@ The `homeguard` service is written in Rust and owns:
 
 ## Status
 
-Work in progress. The Docker Compose stack and the alarm state machine are
-in place; the `homeguard` service does not run yet.
+Work in progress. The Docker Compose stack, the alarm state machine and the
+sensor fusion rules are in place; the `homeguard` service does not run yet.
 
 ## Quick start
 
@@ -139,6 +139,35 @@ services that use that account.
 - To arm in another mode after an alarm, disarm first.
 - **Smoke and water leaks always alert**, whatever the arm state. Smoke also
   starts the siren and turns the lights on. Neither changes the arm state.
+
+## Sensor fusion
+
+A single sensor is easy to fool: a curtain moving in front of a PIR, a fan
+disturbing wisense, a shadow on a camera. homeguard combines them before
+deciding. Every sensor and camera belongs to a **zone** (`zones = [...]` in
+[config/homeguard.toml](config/homeguard.toml)), and these rules apply while
+armed:
+
+| What happens | Result |
+|---|---|
+| Door or window opens | Entry delay, then alarm |
+| Motion alone (wisense or PIR) | No alarm. A 20 s confirmation window opens in its zone |
+| …and a camera in the same zone sees a person (score ≥ 0.7) within the window | **Alarm now**, with the snapshot |
+| …and a *different kind* of sensor (e.g. wisense + PIR) in the same zone within the window | **Alarm now** |
+| …and nothing confirms it | Logged; a silent "unconfirmed motion" notice, at most once per zone every 10 min |
+| A person on camera alone | Same as motion alone: waits for a PIR or wisense in the zone |
+| A door opens within 2 min of a known phone coming home | The owner: no alarm. Disarms if `[presence] auto_disarm = true`, otherwise sends a notice and ignores sensors for 5 min |
+| A camera or critical sensor stays offline for 60 s | "Possible tampering" alert |
+
+Two sources of the *same* kind never confirm each other: two wisense links see
+the same disturbance, and a sensor repeating itself is no new evidence. A
+confirmation window is never extended, so a flapping sensor cannot hold one
+open forever.
+
+The same alert (same cause: smoke on one sensor, tampering on one camera) is
+sent at most once every 5 minutes; the siren still reacts every time. Every
+event is logged whether or not it alerts. All durations and the score
+threshold are in the `[fusion]` section.
 
 ## Development
 

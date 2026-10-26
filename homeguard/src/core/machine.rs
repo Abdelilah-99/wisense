@@ -314,38 +314,28 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::core::config::{CameraSpec, SensorKind, SensorSpec};
+    use crate::core::config::tests::{camera, sensor, zones};
+    use crate::core::config::SensorKind;
     use crate::core::event::MotionSource;
-
-    fn sensor(id: &str, kind: SensorKind, modes: Option<Vec<Mode>>) -> SensorSpec {
-        SensorSpec {
-            id: id.into(),
-            kind,
-            name: None,
-            modes,
-        }
-    }
 
     /// Exit 60 s, entry 30 s, auto-reset 10 min (the defaults).
     fn machine() -> AlarmMachine {
         let catalog = Catalog::new(
+            &zones(&["house", "garden"]),
             vec![
-                sensor("front_door", SensorKind::Contact, None),
-                sensor("bedroom_window", SensorKind::Contact, None),
-                sensor("living_pir", SensorKind::Pir, None),
+                sensor("front_door", SensorKind::Contact, "house", None),
+                sensor("bedroom_window", SensorKind::Contact, "house", None),
+                sensor("living_pir", SensorKind::Pir, "house", None),
                 sensor(
                     "downstairs_pir",
                     SensorKind::Pir,
+                    "house",
                     Some(vec![Mode::Away, Mode::Night]),
                 ),
-                sensor("kitchen_smoke", SensorKind::Smoke, None),
-                sensor("sink_leak", SensorKind::Leak, None),
+                sensor("kitchen_smoke", SensorKind::Smoke, "house", None),
+                sensor("sink_leak", SensorKind::Leak, "house", None),
             ],
-            vec![CameraSpec {
-                id: "garden".into(),
-                name: None,
-                modes: None,
-            }],
+            vec![camera("garden", "garden")],
         )
         .unwrap();
         AlarmMachine::new(AlarmConfig::default(), catalog)

@@ -63,13 +63,13 @@ snapshots:
     default: 7
 
 cameras:
-  # ONE example camera. The id (front_door) is what homeguard.toml refers to.
+  # ONE example camera. Its id (front_cam) is what homeguard.toml refers to.
   # Replace the path with your camera's RTSP URL (see docs/hardware.md); put
   # its address in FRIGATE_CAMERA_FRONT_HOST and its login in
   # FRIGATE_RTSP_USER / FRIGATE_RTSP_PASSWORD in .env.
   # Typical paths: Reolink /h264Preview_01_sub, Tapo /stream2,
   # Dahua /cam/realmonitor?channel=1&subtype=1, Hikvision /Streaming/Channels/102.
-  front_door:
+  front_cam:
     enabled: true
     ffmpeg:
       inputs:

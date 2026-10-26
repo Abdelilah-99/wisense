@@ -6,12 +6,17 @@
 //! replay scripted timelines through the same code that runs on the hub.
 
 pub mod config;
+pub mod engine;
 pub mod event;
 pub mod machine;
 pub mod state;
 pub mod time;
 
-pub use config::{AlarmConfig, CameraSpec, Catalog, SensorKind, SensorSpec};
+pub use config::{
+    AlarmConfig, CameraSpec, Catalog, ConfigError, CoreConfig, FusionConfig, PresenceRules,
+    SensorKind, SensorSpec,
+};
+pub use engine::Engine;
 pub use event::{Action, AlertLevel, Command, Event, Input, Mode, MotionSource};
 pub use machine::{AlarmMachine, Delay};
 pub use state::{Cause, State};

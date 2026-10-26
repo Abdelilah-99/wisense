@@ -1,6 +1,10 @@
 # homeguard configuration. Secrets never go here: they come from .env.
 # Durations are written like "30s", "2m", "1h30m", "7d".
 
+# The zones of the home. Every sensor and camera belongs to one; motion is
+# only confirmed by other sources in the same zone.
+zones = ["entrance", "living-room", "kitchen", "garden"]
+
 [alarm]
 # Time to leave after arming.
 exit_delay = "60s"
@@ -9,24 +13,52 @@ entry_delay = "30s"
 # A triggered alarm stops the siren and re-arms after this long.
 auto_reset = "10m"
 
+# Rules that cut false alarms (see README, "Sensor fusion").
+[fusion]
+# Motion alone waits this long for confirmation (a person on a camera in the
+# same zone, or motion from another kind of sensor in the same zone).
+confirm_window = "20s"
+# Minimum Frigate score for a person to count (0 to 1).
+person_score = 0.7
+# At most one "unconfirmed motion" notice per zone this often.
+unconfirmed_cooldown = "10m"
+# The same alert (same cause) at most once this often.
+alert_cooldown = "5m"
+# A door opening this soon after a known phone came home is the owner.
+owner_arrival_window = "2m"
+# Then intrusion sensors are ignored this long, unless auto_disarm is on.
+owner_grace = "5m"
+# Ignore devices that come back online within this time.
+offline_debounce = "60s"
+
+[presence]
+# Disarm when a known phone comes home. Off by default.
+auto_disarm = false
+
 # Every sensor and camera homeguard should know about. `modes` lists the arm
 # modes in which it can raise an alarm. Defaults: contacts in every mode,
 # motion sensors (pir, wisense) in away only, cameras in away and night.
-# Smoke and leak sensors always alert, whatever the mode.
+# Smoke and leak sensors always alert, whatever the mode. `critical = true`
+# makes it going offline while armed a tampering alert; the default is true
+# for contacts, wisense and smoke sensors, false for PIR and leak sensors
+# (they more often just have a flat battery). Cameras are always critical.
 
 [[sensors]]
 id = "front_door"
 kind = "contact"
+zone = "entrance"
 name = "Front door"
 
 [[sensors]]
 id = "living_room_pir"
 kind = "pir"
+zone = "living-room"
 name = "Living room motion"
 
 [[sensors]]
 id = "hallway_pir"
 kind = "pir"
+zone = "entrance"
 name = "Downstairs hallway motion"
 # Also watch the downstairs hallway at night.
 modes = ["away", "night"]
@@ -34,14 +66,17 @@ modes = ["away", "night"]
 [[sensors]]
 id = "kitchen_smoke"
 kind = "smoke"
+zone = "kitchen"
 name = "Kitchen smoke detector"
 
 [[sensors]]
 id = "sink_leak"
 kind = "leak"
+zone = "kitchen"
 name = "Kitchen sink leak sensor"
 
 [[cameras]]
 # The camera name in config/frigate/config.yml.
-id = "front_door"
+id = "front_cam"
+zone = "entrance"
 name = "Front door camera"
