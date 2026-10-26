@@ -1,5 +1,7 @@
 # wisense
 
+[![CI](https://github.com/Abdelilah-99/wisense/actions/workflows/ci.yml/badge.svg)](https://github.com/Abdelilah-99/wisense/actions/workflows/ci.yml)
+
 Detect people moving around your home from the way WiFi signals fluctuate,
 using nothing but a laptop's WiFi card, optionally helped by cheap ESP32
 boards.
@@ -1336,6 +1338,9 @@ cargo test                                          # 57 tests
 cargo test --all-features                           # 65 tests (adds ESP32 + nl80211)
 cargo test regenerate_replay_fixture -- --ignored   # rewrite tests/fixtures/synthetic_walk.csv
 ```
+
+GitHub Actions runs the first five commands on every push and pull request
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 | Area | What the tests check |
 |---|---|

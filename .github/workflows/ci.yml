@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pkg-config and libudev-dev are listed for the `esp32` feature's
+      # serial-port crate (built without udev, but kept for parity with the
+      # README's setup).
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Tests (default features)
+        run: cargo test
+      - name: Tests (all features)
+        run: cargo test --all-features
