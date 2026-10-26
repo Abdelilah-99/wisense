@@ -20,6 +20,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
+use serde::{Serialize, Serializer};
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
@@ -75,6 +76,12 @@ impl MacAddr {
 
     pub fn is_zero(&self) -> bool {
         self.0 == [0; 6]
+    }
+}
+
+impl Serialize for MacAddr {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
     }
 }
 
@@ -392,7 +399,7 @@ pub struct ProbeResult {
 }
 
 /// A device as `wisense discover` reports it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Candidate {
     pub ip: Ipv4Addr,
     pub mac: Option<MacAddr>,
@@ -635,6 +642,62 @@ async fn ping_host(ip: Ipv4Addr, count: u32, timeout_s: f64) -> Result<PingStats
             String::from_utf8_lossy(&output.stderr).trim()
         )
     })
+}
+
+// ----------------------------------------------------------------- output
+
+/// Short labels for what is notable about a device.
+pub fn tags(c: &Candidate) -> Vec<&'static str> {
+    let mut tags = Vec::new();
+    if c.gateway {
+        tags.push("gateway");
+    }
+    if c.randomized_mac {
+        tags.push("randomized MAC");
+    }
+    if c.no_icmp_reply {
+        tags.push("no ICMP reply");
+    }
+    tags
+}
+
+/// One line per device, best first, under a header line.
+pub fn format_table(candidates: &[Candidate]) -> Vec<String> {
+    let ms = |v: Option<f64>| v.map_or_else(|| "-".to_string(), |v| format!("{v:.1} ms"));
+    let mut lines = vec![format!(
+        "{:<15}  {:<17}  {:>12}  {:>9}  {:>9}  TAGS",
+        "IP", "MAC", "REPLIES", "MEDIAN", "JITTER"
+    )];
+    for c in candidates {
+        lines.push(
+            format!(
+                "{:<15}  {:<17}  {:>12}  {:>9}  {:>9}  {}",
+                c.ip.to_string(),
+                c.mac.map_or_else(|| "?".to_string(), |m| m.to_string()),
+                format!(
+                    "{}/{} {:>3.0}%",
+                    c.received.min(c.sent),
+                    c.sent,
+                    c.response_rate * 100.0
+                ),
+                ms(c.median_rtt_ms),
+                ms(c.jitter_ms),
+                tags(c).join(", ")
+            )
+            .trim_end()
+            .to_string(),
+        );
+    }
+    lines
+}
+
+/// The JSON object printed for one device by `wisense discover --json`.
+#[derive(Debug, Serialize)]
+pub struct DeviceJson<'a> {
+    pub rank: usize,
+    #[serde(flatten)]
+    pub candidate: &'a Candidate,
+    pub tags: Vec<&'static str>,
 }
 
 #[cfg(test)]
@@ -1162,5 +1225,56 @@ rtt min/avg/max/mdev = a/b/c/d ms
         assert_eq!(hosts.len(), 5);
         assert!(!hosts.contains(&own));
         assert_eq!(hosts_to_probe(&subnet, None).len(), 6);
+    }
+
+    // ------------------------------------------------------------- output
+
+    #[test]
+    fn table_rows_and_tags() {
+        let gateway = ProbeResult {
+            gateway: true,
+            ..probe(
+                1,
+                stats(5, &[4.8, 4.9, 5.1, 4.9, 5.0], Some(0.117)),
+                Some("f4:fc:49:04:b2:b9"),
+            )
+        };
+        let phone = probe(
+            23,
+            stats(5, &[30.0, 50.0, 40.0], Some(8.2)),
+            Some("76:62:94:1a:2b:3c"),
+        );
+        let silent = probe(7, stats(5, &[], None), Some("38:91:48:aa:bb:cc"));
+        let ranked = rank_candidates(&[phone, silent, gateway]);
+        let lines = format_table(&ranked);
+        assert_eq!(
+            lines,
+            [
+                "IP               MAC                     REPLIES     MEDIAN     JITTER  TAGS",
+                "192.168.1.1      f4:fc:49:04:b2:b9      5/5 100%     4.9 ms     0.1 ms  gateway",
+                "192.168.1.23     76:62:94:1a:2b:3c      3/5  60%    40.0 ms     8.2 ms  randomized MAC",
+                "192.168.1.7      38:91:48:aa:bb:cc      0/5   0%          -          -  no ICMP reply",
+            ]
+        );
+        assert_eq!(format_table(&[]).len(), 1);
+    }
+
+    #[test]
+    fn json_object_per_device() {
+        let c = Candidate::from(&probe(
+            23,
+            stats(4, &[2.0, 4.0], Some(1.0)),
+            Some("76:62:94:1A:2B:3C"),
+        ));
+        let json = serde_json::to_string(&DeviceJson {
+            rank: 2,
+            candidate: &c,
+            tags: tags(&c),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"rank":2,"ip":"192.168.1.23","mac":"76:62:94:1a:2b:3c","sent":4,"received":2,"response_rate":0.5,"median_rtt_ms":3.0,"jitter_ms":1.0,"gateway":false,"randomized_mac":true,"no_icmp_reply":false,"tags":["randomized MAC"]}"#
+        );
     }
 }

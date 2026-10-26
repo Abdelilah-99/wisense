@@ -124,6 +124,7 @@ motion and prints when the motion happens, so you can compare.
 |---|---|
 | `list-ifaces` | Wireless interfaces in `/proc/net/wireless`, with signal and gateway. |
 | `list-aps [--iface X]` | Access points the card sees, via `iw scan`. A fresh scan needs root (`sudo`); without it the kernel's cached results are shown. Not used for sensing. |
+| `discover [--iface X] [--count 5] [--timeout 1] [--concurrency 64] [--allow-large-subnet] [--json]` | Devices on the WiFi network, ranked as keepalive targets ([below](#finding-devices-on-the-network-discover)). |
 | `calibrate [--seconds 60] [--baseline FILE]` | Measures the idle baseline of every link and saves it. |
 | `monitor [--baseline FILE] [--json \| --tui]` | Detects motion. |
 | `record --out FILE [--seconds N]` | Saves raw samples to CSV (`ts_unix_ms,link_id,rssi_dbm,csi`). |
@@ -141,6 +142,42 @@ The same flag groups appear in several commands:
 - **Output flags** (`monitor`, `replay`, `demo`): `--json` or `--tui`.
 - **Everywhere**: `-v` for debug logging (`-vv` for even more). Among other
   things it logs how often the RSSI value actually changes.
+
+### Finding devices on the network (`discover`)
+
+**Only run `discover` on networks you own or are allowed to scan.** It pings
+every address of the subnet, which is easy to notice and can break the rules
+of a network that isn't yours.
+
+`wisense discover` lists the devices on the WiFi interface's subnet, best
+keepalive target first. It needs no root:
+
+1. It reads the subnet from `/proc/net/route` (e.g. `192.168.1.0/24`) and
+   refuses anything larger than a /22 (1022 addresses) unless you pass
+   `--allow-large-subnet`.
+2. It pings every address except the laptop's own: `--count` pings each,
+   waiting up to `--timeout` seconds per reply, `--concurrency` addresses at
+   a time. With the defaults a /24 takes about 20 s.
+3. It reads `/proc/net/arp` afterwards, so a device that ignores pings but
+   answered ARP still appears, tagged `no ICMP reply`.
+4. It ranks the devices by response rate, then jitter (how much the
+   round-trip time varies, ping's `mdev`), then median round-trip time.
+
+```text
+IP               MAC                     REPLIES     MEDIAN     JITTER  TAGS
+192.168.1.1      f4:fc:49:04:b2:b9      5/5 100%     3.9 ms     0.4 ms  gateway
+192.168.1.20     38:91:48:aa:bb:cc      5/5 100%     5.2 ms     1.1 ms
+192.168.1.23     76:62:94:1a:2b:3c      4/5  80%   180.0 ms    95.3 ms  randomized MAC
+192.168.1.7      00:42:38:01:02:03      0/5   0%          -          -  no ICMP reply
+```
+
+`randomized MAC` marks a locally administered "private" address, as phones
+use; such devices come and go and sleep. `--json` prints one object per
+device instead:
+
+```json
+{"rank":1,"ip":"192.168.1.1","mac":"f4:fc:49:04:b2:b9","sent":5,"received":5,"response_rate":1.0,"median_rtt_ms":3.9,"jitter_ms":0.4,"gateway":true,"randomized_mac":false,"no_icmp_reply":false,"tags":["gateway"]}
+```
 
 ## 4. Output
 
@@ -323,7 +360,7 @@ then says so and you can use the default procfs source.
 - **"RSSI hasn't changed for 3.0 s"**: the value isn't being refreshed.
   Check that the keepalive ping is running and that your router answers
   pings. If it doesn't, use `--keepalive-target` with another device on your
-  network.
+  network; `wisense discover` lists the ones that answer.
 - **"keepalive ping ... exited"**: often `--ping-interval` is below what your
   ping allows without root.
 - **Motion never ends, or constant false alarms**: something keeps moving

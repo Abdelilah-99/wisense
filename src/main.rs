@@ -2,8 +2,6 @@
 
 mod config;
 mod detector;
-// Not used by a command yet: `wisense discover` comes in a later commit.
-#[allow(dead_code)]
 mod discover;
 mod output;
 mod record;
@@ -14,7 +12,7 @@ mod traffic;
 mod zones;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -60,6 +58,9 @@ enum Command {
     /// List access points visible to the card (uses `iw scan`; a fresh scan
     /// needs root). Not used for sensing.
     ListAps(ListApsArgs),
+    /// Find the devices on the WiFi network and rank them as keepalive
+    /// targets. Only scan networks you own or are allowed to scan.
+    Discover(DiscoverArgs),
     /// Measure the idle baseline with the room empty and save it.
     Calibrate(CalibrateArgs),
     /// Watch the links and report motion.
@@ -200,6 +201,29 @@ struct ListApsArgs {
 }
 
 #[derive(Args)]
+struct DiscoverArgs {
+    /// Wireless interface whose subnet is scanned [default: first one in
+    /// /proc/net/wireless].
+    #[arg(long)]
+    iface: Option<String>,
+    /// Pings sent to each address.
+    #[arg(long, default_value_t = config::DEFAULT_DISCOVER_COUNT)]
+    count: u32,
+    /// Seconds to wait for each reply.
+    #[arg(long, default_value_t = config::DEFAULT_DISCOVER_TIMEOUT_S)]
+    timeout: f64,
+    /// Addresses probed at the same time.
+    #[arg(long, default_value_t = config::DEFAULT_DISCOVER_CONCURRENCY)]
+    concurrency: usize,
+    /// Probe a subnet larger than a /22 (more than 1022 addresses).
+    #[arg(long)]
+    allow_large_subnet: bool,
+    /// One JSON object per device on stdout, best first.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
 struct CalibrateArgs {
     /// How long to measure. Keep the room empty and still the whole time.
     #[arg(long, default_value_t = config::DEFAULT_CALIBRATE_SECONDS)]
@@ -279,6 +303,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::ListIfaces => cmd_list_ifaces(),
         Command::ListAps(args) => cmd_list_aps(args),
+        Command::Discover(args) => cmd_discover(args).await,
         Command::Calibrate(args) => cmd_calibrate(args).await,
         Command::Monitor(args) => cmd_monitor(args).await,
         Command::Record(args) => cmd_record(args).await,
@@ -370,6 +395,60 @@ fn cmd_list_aps(args: ListApsArgs) -> Result<()> {
                 &ap.ssid
             }
         );
+    }
+    Ok(())
+}
+
+async fn cmd_discover(args: DiscoverArgs) -> Result<()> {
+    let iface =
+        procfs::resolve_iface(Path::new(procfs::WIRELESS_PATH), args.iface.as_deref())?.iface;
+    let opts = discover::DiscoverOptions {
+        iface,
+        count: args.count,
+        timeout_s: args.timeout,
+        concurrency: args.concurrency,
+        allow_large_subnet: args.allow_large_subnet,
+    };
+    // Dropping the probe on Ctrl+C kills the ping children (kill_on_drop).
+    let found = tokio::select! {
+        found = discover::discover(&opts) => found?,
+        signal = shutdown_signal() => {
+            signal?;
+            tracing::info!("interrupted, stopping the probe");
+            return Ok(());
+        }
+    };
+    tracing::info!(
+        "{}: subnet {}, gateway {}, this laptop {}; {} device(s) answered",
+        opts.iface,
+        found.subnet,
+        found
+            .gateway
+            .map_or_else(|| "none".to_string(), |g| g.to_string()),
+        found
+            .own_ip
+            .map_or_else(|| "unknown".to_string(), |ip| ip.to_string()),
+        found.candidates.len()
+    );
+    if args.json {
+        let mut out = std::io::stdout().lock();
+        for (i, candidate) in found.candidates.iter().enumerate() {
+            let device = discover::DeviceJson {
+                rank: i + 1,
+                candidate,
+                tags: discover::tags(candidate),
+            };
+            serde_json::to_writer(&mut out, &device).context("writing JSON")?;
+            writeln!(out).context("writing JSON")?;
+        }
+        return Ok(());
+    }
+    if found.candidates.is_empty() {
+        println!("no devices answered on {}", found.subnet);
+        return Ok(());
+    }
+    for line in discover::format_table(&found.candidates) {
+        println!("{line}");
     }
     Ok(())
 }

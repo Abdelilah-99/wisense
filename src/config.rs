@@ -47,6 +47,12 @@ pub const DEFAULT_BAUD: u32 = 921_600;
 /// A new zone must stay on top this long before the zone switches.
 pub const DEFAULT_ZONE_HOLD_MS: u64 = 1000;
 
+/// `wisense discover`: pings sent to each address.
+pub const DEFAULT_DISCOVER_COUNT: u32 = 5;
+/// `wisense discover`: seconds to wait for each reply.
+pub const DEFAULT_DISCOVER_TIMEOUT_S: f64 = 1.0;
+/// `wisense discover`: addresses probed at the same time.
+pub const DEFAULT_DISCOVER_CONCURRENCY: usize = 64;
 /// `wisense discover` refuses subnets with a shorter prefix than this (more
 /// than 1022 hosts) unless `--allow-large-subnet` is given.
 pub const DEFAULT_MAX_SUBNET_PREFIX: u8 = 22;
