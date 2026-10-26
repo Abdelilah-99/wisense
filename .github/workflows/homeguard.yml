@@ -1,0 +1,50 @@
+name: homeguard
+
+on:
+  push:
+    paths:
+      - "homeguard/**"
+      - ".github/workflows/homeguard.yml"
+  pull_request:
+    paths:
+      - "homeguard/**"
+      - ".github/workflows/homeguard.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: homeguard
+
+jobs:
+  rust:
+    name: fmt, clippy and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: homeguard -> target
+
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --all-features
+
+  compose:
+    name: compose config and secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yml
+        run: docker compose config -q
+      - name: Look for committed secrets
+        run: scripts/check-secrets.sh

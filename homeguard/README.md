@@ -1,5 +1,7 @@
 # homeguard
 
+[![homeguard CI](https://github.com/Abdelilah-99/wisense/actions/workflows/homeguard.yml/badge.svg)](https://github.com/Abdelilah-99/wisense/actions/workflows/homeguard.yml)
+
 A local, self-hosted home security system. It runs entirely on a hub in your
 home (an old laptop, a mini PC or a Raspberry Pi 5 running Linux). Nothing
 depends on the cloud except Telegram, which delivers the alerts.
@@ -64,6 +66,21 @@ The `homeguard` service is written in Rust and owns:
 ## Status
 
 Work in progress. Nothing works yet: this is the repository skeleton.
+
+## Development
+
+Every commit must pass, from `homeguard/`:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+docker compose config -q
+scripts/check-secrets.sh
+```
+
+CI ([.github/workflows/homeguard.yml](../.github/workflows/homeguard.yml))
+runs the same checks on every push and pull request that touches `homeguard/`.
 
 ## License
 

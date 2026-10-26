@@ -1,0 +1,4 @@
+# The service stack is added in the infrastructure commit; this placeholder
+# lets CI validate the file from the start.
+name: homeguard
+services: {}
