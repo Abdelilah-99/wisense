@@ -1,2 +1,47 @@
-# homeguard configuration. The settings are documented as they are added;
-# see README.md. Secrets never go here: they come from .env.
+# homeguard configuration. Secrets never go here: they come from .env.
+# Durations are written like "30s", "2m", "1h30m", "7d".
+
+[alarm]
+# Time to leave after arming.
+exit_delay = "60s"
+# Time to disarm after an entry door opens.
+entry_delay = "30s"
+# A triggered alarm stops the siren and re-arms after this long.
+auto_reset = "10m"
+
+# Every sensor and camera homeguard should know about. `modes` lists the arm
+# modes in which it can raise an alarm. Defaults: contacts in every mode,
+# motion sensors (pir, wisense) in away only, cameras in away and night.
+# Smoke and leak sensors always alert, whatever the mode.
+
+[[sensors]]
+id = "front_door"
+kind = "contact"
+name = "Front door"
+
+[[sensors]]
+id = "living_room_pir"
+kind = "pir"
+name = "Living room motion"
+
+[[sensors]]
+id = "hallway_pir"
+kind = "pir"
+name = "Downstairs hallway motion"
+# Also watch the downstairs hallway at night.
+modes = ["away", "night"]
+
+[[sensors]]
+id = "kitchen_smoke"
+kind = "smoke"
+name = "Kitchen smoke detector"
+
+[[sensors]]
+id = "sink_leak"
+kind = "leak"
+name = "Kitchen sink leak sensor"
+
+[[cameras]]
+# The camera name in config/frigate/config.yml.
+id = "front_door"
+name = "Front door camera"

@@ -12,3 +12,7 @@ publish = false
 [workspace]
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]

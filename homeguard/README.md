@@ -65,8 +65,8 @@ The `homeguard` service is written in Rust and owns:
 
 ## Status
 
-Work in progress. The Docker Compose stack is in place; the `homeguard`
-service itself is still a placeholder.
+Work in progress. The Docker Compose stack and the alarm state machine are
+in place; the `homeguard` service does not run yet.
 
 ## Quick start
 
@@ -119,6 +119,26 @@ needs the hub's ARP table; it reaches MQTT and Frigate over loopback.
 MQTT never accepts anonymous clients. To change a password, edit `.env`, run
 `scripts/mqtt-passwd.sh`, then `docker compose restart mosquitto` and the
 services that use that account.
+
+## How the alarm behaves
+
+| State | Meaning | Leaves when |
+|---|---|---|
+| `disarmed` | Nothing is watched except smoke and leaks | someone arms |
+| `arming` | Exit delay (default 60 s): time to leave | the delay ends → `armed` |
+| `armed` (away, home or night) | Active sensors are watched | an active sensor trips |
+| `pending` | Entry delay (default 30 s): time to disarm | the delay ends → `triggered` |
+| `triggered` | Siren and lights on, critical alert sent | disarm, or auto-reset (default 10 min) re-arms |
+
+- **Modes** decide which sensors count: by default doors and windows in
+  every mode, motion sensors only in `away`, cameras in `away` and `night`.
+  Override per sensor with `modes = [...]` in
+  [config/homeguard.toml](config/homeguard.toml).
+- Sensors tripped during the exit delay are ignored, so you can leave.
+- A second sensor during the entry delay does not restart the countdown.
+- To arm in another mode after an alarm, disarm first.
+- **Smoke and water leaks always alert**, whatever the arm state. Smoke also
+  starts the siren and turns the lights on. Neither changes the arm state.
 
 ## Development
 
