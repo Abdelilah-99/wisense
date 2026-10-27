@@ -65,10 +65,13 @@ The `homeguard` service is written in Rust and owns:
 
 ## Status
 
-Work in progress. The Docker Compose stack, the alarm state machine, the
-sensor fusion rules, the MQTT integration, presence detection, the wisense
-bridge, simulation, Telegram alerts and commands, the event log and the
-dashboard work.
+Every part is built: the Docker Compose stack, the alarm state machine, the
+sensor fusion rules, MQTT, phone presence, the wisense bridge, simulation,
+Telegram alerts and commands, the event log and the dashboard. It is tested
+without hardware (145 automated tests, 7 scenarios, and manual runs against
+a real broker, a real wisense and fake Telegram/Frigate APIs). It has **not
+yet run with real cameras or Zigbee devices**; see
+[docs/testing.md](docs/testing.md) for what that leaves unverified.
 
 ## Quick start
 
@@ -557,6 +560,10 @@ expectation is not met, and `cargo test` runs every scenario in
   access, backups, power.
 - [Privacy guide](docs/privacy.md): what to film, who to tell, Morocco's
   Law 09-08, retention.
+- [Architecture](docs/architecture.md): the diagram, every MQTT topic, a tour
+  of the code, and the design decisions.
+- [Testing](docs/testing.md): running the checks and scenarios, what each
+  area covers, what still needs real hardware.
 
 ## Development
 
@@ -572,6 +579,7 @@ scripts/check-secrets.sh
 
 CI ([.github/workflows/homeguard.yml](../.github/workflows/homeguard.yml))
 runs the same checks on every push and pull request that touches `homeguard/`.
+[docs/testing.md](docs/testing.md) explains what the tests cover.
 
 ## License
 
