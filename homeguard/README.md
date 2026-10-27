@@ -72,7 +72,8 @@ dashboard work.
 
 ## Quick start
 
-On the hub (Linux with Docker Engine and the Compose plugin installed):
+On the hub (Linux with Docker Engine and the Compose plugin installed; the
+[setup guide](docs/setup.md) starts from a fresh Ubuntu machine):
 
 ```sh
 git clone https://github.com/Abdelilah-99/wisense.git
@@ -547,6 +548,15 @@ or `camera`), `person_detected` (camera, score, snapshot_ref),
 reports, so delays end at their exact time. `simulate` exits non-zero if an
 expectation is not met, and `cargo test` runs every scenario in
 `scenarios/`.
+
+## Documentation
+
+- [Setup guide](docs/setup.md): from a fresh Ubuntu machine to the first alert.
+- [Hardware guide](docs/hardware.md): what to buy and what to check first.
+- [Hardening guide](docs/hardening.md): passwords, network isolation, remote
+  access, backups, power.
+- [Privacy guide](docs/privacy.md): what to film, who to tell, Morocco's
+  Law 09-08, retention.
 
 ## Development
 
