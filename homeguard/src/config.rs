@@ -17,6 +17,7 @@ use crate::core::{CoreConfig, Engine};
 use crate::parse::Mapping;
 use crate::presence::ProbeConfig;
 use crate::telegram::TelegramConfig;
+use crate::web::WebConfig;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -28,6 +29,8 @@ pub struct AppConfig {
     pub actuators: Actuators,
     pub presence: ProbeConfig,
     pub telegram: TelegramConfig,
+    pub web: WebConfig,
+    pub log: LogConfig,
 }
 
 /// The shell's sections. Parsed separately from [`CoreConfig`] (the same
@@ -48,6 +51,10 @@ struct ShellSections {
     presence: ProbeConfig,
     #[serde(default)]
     telegram: TelegramConfig,
+    #[serde(default)]
+    web: WebConfig,
+    #[serde(default)]
+    log: LogConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -135,6 +142,26 @@ pub struct WisenseConfig {
     pub links: BTreeMap<String, String>,
 }
 
+/// The event log.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LogConfig {
+    /// SQLite file, relative to the data directory.
+    pub database: String,
+    /// Events older than this are deleted.
+    #[serde(with = "serde_duration")]
+    pub retention: Duration,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        LogConfig {
+            database: "homeguard.db".into(),
+            retention: Duration::from_secs(90 * 86_400),
+        }
+    }
+}
+
 /// Zigbee devices homeguard drives directly through Zigbee2MQTT.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -159,6 +186,8 @@ impl AppConfig {
             actuators: shell.actuators,
             presence: shell.presence,
             telegram: shell.telegram,
+            web: shell.web,
+            log: shell.log,
         };
         config.validate()?;
         Ok(config)

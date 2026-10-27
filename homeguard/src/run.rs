@@ -18,6 +18,7 @@ use tracing::{error, info, warn};
 
 use crate::config::AppConfig;
 use crate::core::{Action, AlertLevel, Command, Engine, Event, Input, Mode, State, Ts};
+use crate::db::{EventLog, NewEvent};
 use crate::mqtt::{self, Connection};
 use crate::publish::{state_message, Outgoing, Publisher, AVAILABILITY_TOPIC};
 use crate::status::{LogLine, RecentLog, Status};
@@ -159,6 +160,18 @@ pub async fn run(config: AppConfig, options: RunOptions) -> anyhow::Result<()> {
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating data directory {}", data_dir.display()))?;
 
+    let db_path = data_dir.join(&config.log.database);
+    let log = EventLog::open(&db_path).await?;
+    let (log_tx, log_writer) = log.writer();
+    tokio::spawn(log_writer);
+    tokio::spawn(log.clone().prune_forever(config.log.retention));
+    info!(path = %db_path.display(), retention = ?config.log.retention, "event log open");
+    let web_password = env(&config.web.password_env).filter(|p| !p.is_empty());
+    let web_pin = env(&config.web.pin_env).filter(|p| !p.trim().is_empty());
+    let web_bind = env(&config.web.bind_env)
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| config.web.bind.clone());
+
     let (client, eventloop) = Connection::from_config(&config.mqtt, username, password).open();
     let (events_tx, events_rx) = mpsc::channel::<Event>(1024);
     let (commands_tx, commands_rx) = mpsc::channel::<CommandRequest>(32);
@@ -204,6 +217,33 @@ pub async fn run(config: AppConfig, options: RunOptions) -> anyhow::Result<()> {
         }
         None => None,
     };
+    match web_password {
+        Some(password) => {
+            if web_pin.is_none() {
+                warn!(
+                    "{} is not set: the dashboard cannot disarm",
+                    config.web.pin_env
+                );
+            }
+            let state = crate::web::WebState::new(
+                handle.clone(),
+                log.clone(),
+                password,
+                web_pin.map(|p| p.trim().to_string()),
+                &config.frigate.url,
+            )?;
+            let bind = web_bind.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::web::serve(std::sync::Arc::new(state), &bind).await {
+                    error!(error = %format!("{e:#}"), "the dashboard stopped");
+                }
+            });
+        }
+        None => warn!(
+            "{} is not set: the dashboard is OFF",
+            config.web.password_env
+        ),
+    }
     tokio::spawn(mqtt::run_incoming(
         eventloop,
         client.clone(),
@@ -227,6 +267,7 @@ pub async fn run(config: AppConfig, options: RunOptions) -> anyhow::Result<()> {
         },
         data_dir: data_dir.clone(),
         alerts,
+        log: log_tx,
     };
     match read_armed(&data_dir) {
         Ok(Some(mode)) => {
@@ -292,6 +333,9 @@ async fn core_loop(
             _ = ticker.tick() => (Event::Tick, None),
             _ = &mut shutdown => break,
         };
+        if let Some(row) = NewEvent::input(unix_ms(), &event) {
+            dispatcher.record(row);
+        }
         let actions = engine.handle(&Input::new(clock.now(), event));
         dispatcher.dispatch(&actions, &mut recent);
 
@@ -343,6 +387,7 @@ struct Dispatcher {
     data_dir: PathBuf,
     /// `None` when Telegram is off or in dry-run mode.
     alerts: Option<mpsc::Sender<Alert>>,
+    log: mpsc::Sender<NewEvent>,
 }
 
 impl Dispatcher {
@@ -350,6 +395,7 @@ impl Dispatcher {
         let now = unix_ms();
         for action in actions {
             log_action(action, self.alerts.is_some());
+            self.record(NewEvent::action(now, action));
             if let Some(line) = LogLine::from_action(now, action) {
                 recent.push(line);
             }
@@ -385,6 +431,13 @@ impl Dispatcher {
 
     fn send(&self, message: Outgoing) {
         mqtt::publish(&self.client, message);
+    }
+
+    /// Queues a row for the event log without waiting.
+    fn record(&self, row: NewEvent) {
+        if let Err(e) = self.log.try_send(row) {
+            warn!(error = %e, "event log queue full; event not stored");
+        }
     }
 
     fn heartbeat(&self) {

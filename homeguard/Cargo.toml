@@ -22,6 +22,9 @@ path = "src/bin/homeguard-wisense-bridge.rs"
 
 [dependencies]
 anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "tracing"] }
+# Decoding HTTP Basic credentials for the dashboard.
+base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 # Telegram Bot API (HTTPS, rustls) and Frigate snapshots.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "multipart"] }
@@ -29,6 +32,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 rumqttc = { version = "0.25", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "signal", "fs", "io-util", "io-std", "net", "process"] }
 toml = "0.9"
@@ -36,3 +40,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "std", "env-filter"] }
 
 [dev-dependencies]
+# Drives the axum router in API tests without a socket.
+tower = { version = "0.5", features = ["util"] }

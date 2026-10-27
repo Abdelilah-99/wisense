@@ -67,7 +67,8 @@ The `homeguard` service is written in Rust and owns:
 
 Work in progress. The Docker Compose stack, the alarm state machine, the
 sensor fusion rules, the MQTT integration, presence detection, the wisense
-bridge, simulation and Telegram alerts and commands work.
+bridge, simulation, Telegram alerts and commands, the event log and the
+dashboard work.
 
 ## Quick start
 
@@ -286,6 +287,51 @@ app with a passcode, and keep the allow-list short.
 Run `homeguard run --dry-run` to log alerts without sending them (Telegram
 commands are off too). Without `TELEGRAM_BOT_TOKEN`, homeguard runs but only
 logs its alerts, with a warning at startup. The token is never logged.
+
+## Dashboard
+
+A single page at `http://HUB_LAN_IP:8080`, with no external scripts, styles
+or fonts. It shows the arm state and its cause, every zone with its sensors
+and cameras (online/offline, doors open/closed), who is home, and the recent
+events with their Frigate snapshots. It has buttons to arm and a PIN field to
+disarm, and refreshes every 3 seconds.
+
+- **Login**: the browser asks for a user name (anything) and the password in
+  `HOMEGUARD_DASHBOARD_PASSWORD`. Without that variable the dashboard is off.
+- **Disarm** needs the PIN in `HOMEGUARD_DISARM_PIN`; without it, the
+  dashboard can arm but not disarm.
+- Five wrong passwords, or five wrong PINs, within 10 minutes lock that
+  client out for 15 minutes.
+- POSTs must be JSON, and a browser's `Origin` must match the dashboard, so
+  other web pages cannot use your logged-in browser to disarm (CSRF).
+- It listens on `HUB_LAN_IP:8080` only (Compose sets `HOMEGUARD_BIND`). The
+  login travels unencrypted on the LAN; for access from outside, use a VPN
+  (Tailscale or WireGuard), never a port forward.
+
+### API
+
+All but `/healthz` need the same login (HTTP Basic).
+
+| Route | |
+|---|---|
+| `GET /healthz` | `ok` |
+| `GET /api/status` | state, mode, cause, zones and devices, presence |
+| `GET /api/events?limit=50` | the event log, newest first (1–500) |
+| `POST /api/arm` | `{"mode": "away"}` (or `home`, `night`) |
+| `POST /api/disarm` | `{"pin": "..."}` |
+| `GET /api/snapshot/<frigate event id>` | the snapshot, proxied from Frigate |
+
+```sh
+curl -u me:PASSWORD http://HUB_LAN_IP:8080/api/status
+curl -u me:PASSWORD -H 'Content-Type: application/json' -d '{"mode":"night"}' http://HUB_LAN_IP:8080/api/arm
+```
+
+### Event log
+
+Every input event (except clock ticks), state change, alert and log line is
+stored in SQLite, `data/homeguard/homeguard.db`, with schema migrations
+applied at startup. Rows older than `[log] retention` (90 days) are deleted
+hourly. Writes are queued, so a slow disk never delays a decision.
 
 ## Phone presence
 

@@ -145,6 +145,21 @@ poll_timeout = "30s"
 # Commands sent while homeguard was down are ignored if older than this.
 max_command_age = "2m"
 
+# The dashboard (see README, "Dashboard"). Its password and the disarm PIN
+# come from .env; without the password the dashboard is off.
+[web]
+# Used unless HOMEGUARD_BIND is set (docker-compose.yml sets it to
+# HUB_LAN_IP:8080, so the dashboard is reachable on the LAN only).
+bind = "127.0.0.1:8080"
+bind_env = "HOMEGUARD_BIND"
+password_env = "HOMEGUARD_DASHBOARD_PASSWORD"
+pin_env = "HOMEGUARD_DISARM_PIN"
+
+# The event log (SQLite in the data directory).
+[log]
+database = "homeguard.db"
+retention = "90d"
+
 # Zigbee devices homeguard drives itself during an alarm (optional).
 [actuators]
 # siren = "hall_siren"
