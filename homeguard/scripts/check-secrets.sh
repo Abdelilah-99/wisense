@@ -19,10 +19,11 @@ fi
 hits=$(grep_files '[0-9]{8,10}:[A-Za-z0-9_-]{35}')
 [ -n "$hits" ] && fail "possible Telegram bot token:"$'\n'"$hits"
 
-# MAC addresses, except well-known non-addresses and documentation examples.
+# MAC addresses, except well-known non-addresses and documentation examples
+# (02:00:00:00:00:xx, and 00:00:5e:00:53:xx reserved by RFC 7042).
 hits=$(grep_files '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' \
-  | grep -viE '(00:){5}00|(ff:){5}ff|aa:bb:cc:dd:ee:ff|02:00:00:00:00:[0-9a-f]{2}' || true)
-[ -n "$hits" ] && fail "possible real MAC address (use 02:00:00:00:00:xx in examples):"$'\n'"$hits"
+  | grep -viE '(00:){5}00|(ff:){5}ff|aa:bb:cc:dd:ee:ff|02:00:00:00:00:[0-9a-f]{2}|00:00:5e:00:53:[0-9a-f]{2}' || true)
+[ -n "$hits" ] && fail "possible real MAC address (use 02:00:00:00:00:xx or the RFC 7042 range 00:00:5e:00:53:xx in examples):"$'\n'"$hits"
 
 # password/token/secret assignments whose value is not a placeholder.
 hits=$(grep_files '(password|passwd|token|secret|pin)[A-Z_]*["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9]' \

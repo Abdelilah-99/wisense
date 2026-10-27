@@ -15,6 +15,7 @@ use serde::Deserialize;
 use crate::core::time::serde_duration;
 use crate::core::{CoreConfig, Engine};
 use crate::parse::Mapping;
+use crate::presence::ProbeConfig;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -24,6 +25,7 @@ pub struct AppConfig {
     pub frigate: FrigateConfig,
     pub wisense: WisenseConfig,
     pub actuators: Actuators,
+    pub presence: ProbeConfig,
 }
 
 /// The shell's sections. Parsed separately from [`CoreConfig`] (the same
@@ -40,6 +42,8 @@ struct ShellSections {
     wisense: WisenseConfig,
     #[serde(default)]
     actuators: Actuators,
+    #[serde(default)]
+    presence: ProbeConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -149,6 +153,7 @@ impl AppConfig {
             frigate: shell.frigate,
             wisense: shell.wisense,
             actuators: shell.actuators,
+            presence: shell.presence,
         };
         config.validate()?;
         Ok(config)
@@ -165,6 +170,19 @@ impl AppConfig {
         for (name, id) in self.zigbee.devices.iter().chain(&self.wisense.links) {
             if catalog.sensor(id).is_none() {
                 bail!("{name:?} maps to {id:?}, which is not a configured sensor");
+            }
+        }
+        self.presence.sweep()?;
+        let probed: Vec<&str> = self
+            .presence
+            .people
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        let mut seen = std::collections::BTreeSet::new();
+        for name in &probed {
+            if !seen.insert(*name) {
+                bail!("presence: {name:?} is listed twice");
             }
         }
         if self.core.fusion.person_score.is_nan()
@@ -238,6 +256,24 @@ zone = "hall"
     fn rejects_unknown_keys_in_shell_sections() {
         let text = format!("{MINIMAL}\n[mqtt]\nhots = \"x\"\n");
         assert!(AppConfig::parse(&text).is_err());
+    }
+
+    #[test]
+    fn presence_people_are_shared_by_core_and_shell() {
+        let text = format!(
+            "{MINIMAL}\n[presence]\ngrace = \"15m\"\nauto_arm = true\nsubnet = \"192.168.1.0/24\"\n\
+             [[presence.people]]\nname = \"alice\"\nmac_env = \"PHONE_ALICE\"\n"
+        );
+        let config = AppConfig::parse(&text).unwrap();
+        assert_eq!(config.core.presence.people[0].name, "alice");
+        assert_eq!(config.core.presence.grace, Duration::from_secs(900));
+        assert!(config.core.presence.auto_arm);
+        assert_eq!(config.presence.people[0].mac_env, "PHONE_ALICE");
+        let twice =
+            format!("{text}[[presence.people]]\nname = \"alice\"\nmac_env = \"PHONE_ALICE2\"\n");
+        assert!(AppConfig::parse(&twice).is_err());
+        let sweep = text.replace("192.168.1.0/24", "10.0.0.0/8");
+        assert!(AppConfig::parse(&sweep).is_err());
     }
 
     #[test]

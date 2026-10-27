@@ -49,11 +49,25 @@ pub async fn run(config: AppConfig, data_dir: PathBuf) -> anyhow::Result<()> {
         .credentials(|name| std::env::var(name).ok())
         .context("MQTT credentials")?;
     let mut engine = config.engine()?;
+    let phones = config.presence.phones(|name| std::env::var(name).ok())?;
+    let sweep = config.presence.sweep()?;
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating data directory {}", data_dir.display()))?;
 
     let (client, eventloop) = Connection::from_config(&config.mqtt, username, password).open();
     let (events_tx, events_rx) = mpsc::channel::<Event>(1024);
+    let clock = Clock::start();
+    if !phones.is_empty() {
+        crate::presence::warn_about_randomized_macs(&phones);
+        tokio::spawn(crate::presence::run(
+            phones,
+            sweep,
+            config.presence.probe_interval,
+            config.core.presence.grace,
+            clock,
+            events_tx.clone(),
+        ));
+    }
     tokio::spawn(mqtt::run_incoming(
         eventloop,
         client.clone(),
@@ -87,7 +101,7 @@ pub async fn run(config: AppConfig, data_dir: PathBuf) -> anyhow::Result<()> {
         }
     }
 
-    core_loop(engine, events_rx, Clock::start(), &mut dispatcher).await;
+    core_loop(engine, events_rx, clock, &mut dispatcher).await;
 
     mqtt::publish(
         &client,

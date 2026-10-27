@@ -453,10 +453,57 @@ impl Engine {
         if home {
             self.arrivals.insert(person.to_string(), at);
         }
-        vec![Action::log(describe(&Event::PresenceChanged {
+        let mut actions = vec![Action::log(describe(&Event::PresenceChanged {
             person: person.into(),
             home,
-        }))]
+        }))];
+        if home && self.presence.auto_disarm && self.armed_away_and_not_triggered() {
+            actions.extend(self.command(
+                at,
+                Command::Disarm,
+                &format!("presence ({person} arrived)"),
+            ));
+        }
+        if !home
+            && self.presence.auto_arm
+            && self.everyone_away()
+            && *self.state() == State::Disarmed
+        {
+            actions.extend(self.command(
+                at,
+                Command::Arm(crate::core::Mode::Away),
+                "presence (everyone away)",
+            ));
+        }
+        actions
+    }
+
+    /// Arming, armed or pending in away mode: the cases a known arrival may
+    /// disarm. Never a running alarm, and never home or night mode, where
+    /// other people are already inside.
+    fn armed_away_and_not_triggered(&self) -> bool {
+        matches!(
+            self.state(),
+            State::Arming {
+                mode: crate::core::Mode::Away,
+                ..
+            } | State::Armed {
+                mode: crate::core::Mode::Away
+            } | State::Pending {
+                mode: crate::core::Mode::Away,
+                ..
+            }
+        )
+    }
+
+    /// Every configured person is known to be away (at least one person).
+    fn everyone_away(&self) -> bool {
+        !self.presence.people.is_empty()
+            && self
+                .presence
+                .people
+                .iter()
+                .all(|p| self.home.get(&p.name) == Some(&false))
     }
 
     fn device_offline(&mut self, at: Ts, device: &str) -> Vec<Action> {
@@ -1044,6 +1091,107 @@ mod tests {
         rig.send(110, command(Command::Disarm));
         assert_eq!(rig.state(), "disarmed");
         assert!(rig.alerts(AlertLevel::Critical).is_empty());
+    }
+
+    fn with_people(auto_arm: bool, auto_disarm: bool) -> CoreConfig {
+        let mut config = config();
+        config.presence.people = vec![
+            crate::core::config::PersonSpec {
+                name: "alice".into(),
+            },
+            crate::core::config::PersonSpec { name: "bob".into() },
+        ];
+        config.presence.auto_arm = auto_arm;
+        config.presence.auto_disarm = auto_disarm;
+        config
+    }
+
+    fn leave(person: &str) -> Event {
+        Event::PresenceChanged {
+            person: person.into(),
+            home: false,
+        }
+    }
+
+    #[test]
+    fn auto_arm_when_everyone_is_away() {
+        let mut rig = Rig::new(with_people(true, false));
+        rig.send(0, arrive("alice"));
+        rig.send(0, arrive("bob"));
+        rig.send(600, leave("alice"));
+        assert_eq!(rig.state(), "disarmed");
+        rig.send(900, leave("bob"));
+        assert!(matches!(
+            rig.engine.state(),
+            State::Arming { mode: Mode::Away, until } if *until == Ts::from_secs(960)
+        ));
+        rig.send(960, Event::Tick);
+        assert_eq!(rig.engine.state(), &State::Armed { mode: Mode::Away });
+    }
+
+    #[test]
+    fn auto_arm_is_off_by_default_and_needs_everyone() {
+        let mut rig = Rig::new(with_people(false, false));
+        rig.send(600, leave("alice"));
+        rig.send(600, leave("bob"));
+        assert_eq!(rig.state(), "disarmed");
+
+        // On, but bob's status is still unknown.
+        let mut rig = Rig::new(with_people(true, false));
+        rig.send(600, leave("alice"));
+        assert_eq!(rig.state(), "disarmed");
+
+        // On, but nobody configured: never.
+        let mut config = config();
+        config.presence.auto_arm = true;
+        let mut rig = Rig::new(config);
+        rig.send(600, leave("alice"));
+        assert_eq!(rig.state(), "disarmed");
+    }
+
+    #[test]
+    fn auto_arm_does_not_override_a_manual_arm() {
+        let mut rig = Rig::new(with_people(true, false));
+        rig.send(0, command(Command::Arm(Mode::Night)));
+        rig.send(60, Event::Tick);
+        rig.send(600, leave("alice"));
+        rig.send(600, leave("bob"));
+        assert_eq!(rig.engine.state(), &State::Armed { mode: Mode::Night });
+    }
+
+    #[test]
+    fn auto_disarm_on_arrival_only_in_away_mode() {
+        let mut rig = Rig::new(with_people(false, true));
+        rig.send(0, command(Command::Arm(Mode::Away)));
+        rig.send(60, Event::Tick);
+        rig.send(500, arrive("alice"));
+        assert_eq!(rig.state(), "disarmed");
+
+        // Night mode: someone is already inside; an arrival does not disarm.
+        let mut rig = Rig::new(with_people(false, true));
+        rig.send(0, command(Command::Arm(Mode::Night)));
+        rig.send(60, Event::Tick);
+        rig.send(500, arrive("alice"));
+        assert_eq!(rig.engine.state(), &State::Armed { mode: Mode::Night });
+    }
+
+    #[test]
+    fn auto_disarm_during_the_entry_delay_but_not_after_the_alarm() {
+        // The phone joins WiFi after the door opened: still in time.
+        let mut rig = Rig::new(with_people(false, true));
+        rig.send(0, command(Command::Arm(Mode::Away)));
+        rig.send(60, Event::Tick);
+        rig.send(100, door(true));
+        rig.send(110, arrive("bob"));
+        assert_eq!(rig.state(), "disarmed");
+
+        let mut rig = Rig::new(with_people(false, true));
+        rig.send(0, command(Command::Arm(Mode::Away)));
+        rig.send(60, Event::Tick);
+        rig.send(100, door(true));
+        rig.send(130, Event::Tick);
+        rig.send(140, arrive("bob"));
+        assert_eq!(rig.state(), "triggered");
     }
 
     #[test]

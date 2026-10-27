@@ -99,12 +99,38 @@ impl Default for FusionConfig {
     }
 }
 
-/// What presence (known phones) may do to the alarm.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+/// Known people and what their presence may do to the alarm. The `[presence]`
+/// table also holds the shell's probe settings (phone MACs come from the
+/// environment), which this struct ignores.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PresenceRules {
-    /// Disarm when a known person arrives home. Off by default.
+    #[serde(default)]
+    pub people: Vec<PersonSpec>,
+    /// A phone unseen this long is away: phones sleep and stop answering.
+    #[serde(with = "serde_duration", default = "defaults::presence_grace")]
+    pub grace: Duration,
+    /// Arm (away) when everyone has been away past the grace period.
+    #[serde(default)]
+    pub auto_arm: bool,
+    /// Disarm an away arming when a known person arrives home.
     #[serde(default)]
     pub auto_disarm: bool,
+}
+
+impl Default for PresenceRules {
+    fn default() -> Self {
+        PresenceRules {
+            people: Vec::new(),
+            grace: defaults::presence_grace(),
+            auto_arm: false,
+            auto_disarm: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PersonSpec {
+    pub name: String,
 }
 
 mod defaults {
@@ -139,6 +165,9 @@ mod defaults {
     }
     pub fn offline_debounce() -> Duration {
         Duration::from_secs(60)
+    }
+    pub fn presence_grace() -> Duration {
+        Duration::from_secs(10 * 60)
     }
 }
 

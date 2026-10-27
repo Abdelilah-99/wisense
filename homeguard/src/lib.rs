@@ -3,13 +3,14 @@
 //! - [`core`]: the pure decision logic (state machine, fusion rules).
 //! - [`parse`]: pure parsers for the MQTT messages homeguard listens to.
 //! - [`publish`]: what homeguard publishes, as a pure function of actions.
-//! - [`config`], [`mqtt`], [`run`], [`bridge`]: the imperative shell.
+//! - [`config`], [`mqtt`], [`run`], [`bridge`], [`presence`]: the imperative shell.
 
 pub mod bridge;
 pub mod config;
 pub mod core;
 pub mod mqtt;
 pub mod parse;
+pub mod presence;
 pub mod publish;
 pub mod run;
 

@@ -31,9 +31,26 @@ owner_grace = "5m"
 # Ignore devices that come back online within this time.
 offline_debounce = "60s"
 
+# Who is home, from the phones on the LAN (see README, "Phone presence").
+# Each phone must use its real MAC on the home WiFi: turn off MAC
+# randomization ("private address") for this network on the phone.
 [presence]
-# Disarm when a known phone comes home. Off by default.
+# A phone unseen this long is away (phones sleep and stop answering).
+grace = "10m"
+probe_interval = "30s"
+# Optional: sweep this subnet to find phones whose IP changed (/22 to /30).
+# subnet = "192.168.1.0/24"
+# Arm (away) once everyone has been away past the grace period. Off by default.
+auto_arm = false
+# Disarm an away arming when a known person comes home. Off by default.
 auto_disarm = false
+
+# One entry per person. The MAC is read from the named variable in .env,
+# never written here. `ip` (optional) is the phone's DHCP reservation.
+# [[presence.people]]
+# name = "alice"
+# mac_env = "HOMEGUARD_PHONE_ALICE"
+# ip = "192.168.1.50"
 
 # Every sensor and camera homeguard should know about. `modes` lists the arm
 # modes in which it can raise an alarm. Defaults: contacts in every mode,

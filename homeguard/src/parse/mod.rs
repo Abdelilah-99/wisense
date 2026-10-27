@@ -5,6 +5,7 @@
 //! topics they do not handle produce nothing, and malformed payloads come
 //! back as a [`ParseError`] for the shell to log and drop.
 
+pub mod arp;
 pub mod frigate;
 pub mod wisense;
 pub mod zigbee;

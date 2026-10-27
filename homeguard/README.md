@@ -235,6 +235,61 @@ cargo run -- run --log debug
 Diagnostics go to stderr. `homeguard healthcheck` (used by Docker) succeeds
 while the core loop is alive.
 
+## Phone presence
+
+homeguard knows who is home by looking for the household's phones on the
+LAN, without root and without an app on the phones. Every `probe_interval`
+(30 s) it reads the hub's ARP table (`/proc/net/arp`): a phone whose MAC has
+a resolved entry answered the previous round of probes, so it is home. Then
+it probes again, pinging each phone's last IP and sending it a one-byte UDP
+datagram (either makes the kernel resolve the phone's MAC, even if the phone
+ignores pings), and, if `subnet` is set, every address of that subnet, to
+find phones that got a new IP.
+
+- A phone is **home** from its first sighting.
+- It is **away** only once it has gone unseen for the grace period (10 min
+  by default). Phones sleep and stop answering for minutes at a time, so a
+  missed probe means nothing.
+- After a restart, a phone that is never seen counts as away once the grace
+  period has passed.
+
+What presence may do, all **off by default** (`[presence]` in
+[config/homeguard.toml](config/homeguard.toml)):
+
+- `auto_arm = true`: arm in away mode once everyone listed has been away past
+  the grace period, if the system is disarmed. A manual arm is never changed.
+- `auto_disarm = true`: disarm when a known phone comes home, but only from
+  away mode (arming, armed or during the entry delay), never from home or
+  night mode (someone is already inside) and never once the alarm went off.
+- Even with both off, a door opening within 2 minutes of a known phone
+  arriving is treated as the owner coming home (see "Sensor fusion").
+
+Configure each person in the config and their phone's MAC in `.env`:
+
+```toml
+[[presence.people]]
+name = "alice"
+mac_env = "HOMEGUARD_PHONE_ALICE"   # .env: HOMEGUARD_PHONE_ALICE=aa:bb:cc:dd:ee:ff
+ip = "192.168.1.50"                  # optional: its DHCP reservation
+```
+
+A person whose MAC variable is missing or invalid stops homeguard at startup,
+because they would otherwise always look away (and could arm the house with
+them inside).
+
+> **Turn off MAC randomization for the home network on every phone.**
+> Modern phones use a made-up ("private", "random") MAC per network by default,
+> and may change it, so homeguard cannot recognize them. On Android:
+> *Settings → Network → Wi-Fi → (your network) → Privacy → Use device MAC*.
+> On iPhone: *Settings → Wi-Fi → (i) next to your network → Private Wi-Fi
+> Address → Off* (or *Fixed*, which stays constant for that network). Then
+> read the MAC shown on that same screen. homeguard logs a warning at startup
+> for any configured MAC that looks randomized (locally administered).
+
+Presence is a convenience, not a security control: anyone who knows your
+WiFi password and a phone's MAC could pretend to be that phone. Keep
+`auto_disarm` off if that matters to you.
+
 ## wisense bridge
 
 [wisense](../README.md) detects motion from the hub's own WiFi card, so it runs
