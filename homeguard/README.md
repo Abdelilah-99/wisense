@@ -365,6 +365,91 @@ runs `wisense monitor --json | homeguard-wisense-bridge` with `Restart=always`;
 if either process dies, both restart. MQTT is reachable on `127.0.0.1:1883`
 because Compose publishes the broker on the host's loopback.
 
+## Simulation
+
+Everything can be tried without any hardware: `homeguard simulate` replays a
+scripted timeline through the real core (the same code as on the hub), with
+no MQTT. Alerts are printed instead of sent.
+
+```sh
+cargo run -- simulate scenarios/burglar_front_door.toml              # instant
+cargo run -- simulate scenarios/burglar_front_door.toml --speed 10   # 10x real time
+```
+
+```text
+scenario: Burglar through the front door
+Armed away. Someone opens the front door and nobody disarms: the entry delay
+runs out and the alarm goes off exactly 30 s later.
+
+      0s  > arm(away) by alice
+      0s    STATE state → arming (away) until t+1m
+      0s    ALERT (info) Arming (away) by alice: armed in 1m.  (printed, not sent)
+      1m    STATE state → armed (away)
+      1m    ALERT (info) Armed (away).  (printed, not sent)
+      5m  > front_door opened
+      5m    STATE state → pending (away) until t+5m30s: Front door opened
+      5m    ALERT (high) Entry: Front door opened. Disarm within 30s or the alarm goes off.  (printed, not sent)
+   5m10s  > motion on hall_pir (PIR)
+   5m10s    log   log: motion on hall_pir (PIR)
+   5m30s    STATE state → TRIGGERED (away) since t+5m30s: Front door opened
+   5m30s    ALERT (critical) ALARM (away): Front door opened.  (printed, not sent)
+   5m30s    DO    siren on
+   5m30s    DO    lights on
+
+final state: triggered
+expectations: all met
+```
+
+| Scenario | What it shows |
+|---|---|
+| [burglar_front_door](scenarios/burglar_front_door.toml) | entry delay running out: alarm exactly 30 s after the door opens |
+| [burglar_confirmed_by_camera](scenarios/burglar_confirmed_by_camera.toml) | wisense motion confirmed by a person on camera: alarm at once, with the snapshot |
+| [motion_without_person](scenarios/motion_without_person.toml) | unconfirmed motion (wrong zone, low score): no alarm, silent notices |
+| [owner_coming_home](scenarios/owner_coming_home.toml) | phone arrives, door opens a minute later: no alarm |
+| [camera_unplugged_while_armed](scenarios/camera_unplugged_while_armed.toml) | tampering alert after the debounce; a flapping camera is not reported |
+| [smoke_while_disarmed](scenarios/smoke_while_disarmed.toml) | safety alerts whatever the arm state, de-duplicated |
+| [flaky_motion_flood](scenarios/flaky_motion_flood.toml) | a faulty sensor for 30 min: no alarm, 4 notices instead of 90 |
+
+A scenario names a configuration (`scenarios/config/house.toml`, same
+format as `config/homeguard.toml`), lists timed events, and says what must
+happen:
+
+```toml
+name = "Burglar through the front door"
+config = "config/house.toml"
+until = "7m"                       # keep the clock running until then
+
+[[step]]
+at = "0s"
+event = { type = "command", command = { arm = "away" }, by = "alice" }
+
+[[step]]
+at = "5m"
+event = { type = "contact_changed", sensor = "front_door", open = true }
+
+[[step]]                           # repeated events
+at = "6m"
+event = { type = "motion_detected", source = "wisense", sensor = "living_wisense" }
+repeat_every = "5s"
+repeat_until = "8m"
+
+[expect]
+final_state = "triggered"
+actions = ["state:pending@5m", "alert:critical@5m30s", "siren_on"]   # in order; @ = exact time
+never = ["siren_off"]
+counts = { "alert:critical" = 1 }
+```
+
+Event types: `contact_changed`, `motion_detected` (source `pir`, `wisense`
+or `camera`), `person_detected` (camera, score, snapshot_ref),
+`presence_changed`, `device_offline`, `device_online`, `smoke_detected`,
+`leak_detected`, `command` (`{ arm = "away" | "home" | "night" }` or
+`"disarm"`). Actions are named `state:<name>`, `alert:<level>`, `siren_on`,
+`siren_off`, `lights_on` and `log`. Time jumps to each deadline the core
+reports, so delays end at their exact time. `simulate` exits non-zero if an
+expectation is not met, and `cargo test` runs every scenario in
+`scenarios/`.
+
 ## Development
 
 Every commit must pass, from `homeguard/`:

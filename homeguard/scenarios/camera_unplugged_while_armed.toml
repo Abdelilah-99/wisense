@@ -1,0 +1,34 @@
+name = "Camera unplugged while armed"
+description = """
+Armed away. The front camera's stream goes offline at 10m and stays down:
+after the 60 s debounce, a high-priority "possible tampering" alert. Later
+the garden camera flaps (offline for 20 s while Frigate restarts its stream):
+not reported."""
+config = "config/house.toml"
+until = "25m"
+
+[[step]]
+at = "0s"
+event = { type = "command", command = { arm = "away" }, by = "alice" }
+
+[[step]]
+at = "10m"
+event = { type = "device_offline", device = "front_cam" }
+
+[[step]]
+at = "10m30s"
+event = { type = "device_offline", device = "front_cam" }
+
+[[step]]
+at = "20m"
+event = { type = "device_offline", device = "garden_cam" }
+
+[[step]]
+at = "20m20s"
+event = { type = "device_online", device = "garden_cam" }
+
+[expect]
+final_state = "armed"
+actions = ["state:armed@1m", "alert:high@11m"]
+never = ["siren_on", "state:triggered"]
+counts = { "alert:high" = 1 }

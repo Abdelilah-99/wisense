@@ -1,0 +1,33 @@
+name = "Burglar through the front door"
+description = """
+Armed away. Someone opens the front door and nobody disarms: the entry delay
+runs out and the alarm goes off exactly 30 s later."""
+config = "config/house.toml"
+until = "7m"
+
+[[step]]
+at = "0s"
+event = { type = "command", command = { arm = "away" }, by = "alice" }
+
+[[step]]
+at = "5m"
+event = { type = "contact_changed", sensor = "front_door", open = true }
+
+[[step]]
+at = "5m10s"
+event = { type = "motion_detected", source = "pir", sensor = "hall_pir" }
+
+[expect]
+final_state = "triggered"
+actions = [
+  "state:arming@0s",
+  "state:armed@1m",
+  "state:pending@5m",
+  "alert:high@5m",
+  "state:triggered@5m30s",
+  "alert:critical@5m30s",
+  "siren_on@5m30s",
+  "lights_on@5m30s",
+]
+never = ["siren_off", "state:disarmed"]
+counts = { "alert:critical" = 1 }

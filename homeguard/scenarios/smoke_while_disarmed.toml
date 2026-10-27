@@ -1,0 +1,25 @@
+name = "Smoke while disarmed"
+description = """
+Disarmed, people at home. The kitchen smoke detector goes off at 1m and keeps
+reporting smoke every 10 s for two minutes. Safety alerts ignore the arm
+state: one critical alert (repeats are de-duplicated for 5 min), the siren
+and the lights. A leak under the sink at 4m is a separate cause: its own
+alert. The arm state never changes."""
+config = "config/house.toml"
+until = "5m"
+
+[[step]]
+at = "1m"
+event = { type = "smoke_detected", sensor = "kitchen_smoke" }
+repeat_every = "10s"
+repeat_until = "3m"
+
+[[step]]
+at = "4m"
+event = { type = "leak_detected", sensor = "sink_leak" }
+
+[expect]
+final_state = "disarmed"
+actions = ["alert:critical@1m", "siren_on@1m", "lights_on@1m", "alert:critical@4m"]
+never = ["state:arming", "state:pending", "state:triggered"]
+counts = { "alert:critical" = 2, "siren_on" = 13 }

@@ -1,0 +1,68 @@
+# The house every scenario runs in. Same format as config/homeguard.toml
+# (only the core's sections matter here). Default timings: exit delay 60 s,
+# entry delay 30 s, auto-reset 10 min, confirmation window 20 s, person score
+# 0.7, unconfirmed-motion notices every 10 min, alert cooldown 5 min,
+# owner-arrival window 2 min (then 5 min of grace), offline debounce 60 s.
+
+zones = ["entrance", "living-room", "kitchen", "garden"]
+
+[presence]
+people = [{ name = "alice" }, { name = "bob" }]
+
+[[sensors]]
+id = "front_door"
+kind = "contact"
+zone = "entrance"
+name = "Front door"
+
+[[sensors]]
+id = "back_door"
+kind = "contact"
+zone = "kitchen"
+name = "Back door"
+
+[[sensors]]
+id = "hall_pir"
+kind = "pir"
+zone = "entrance"
+name = "Hall motion"
+modes = ["away", "night"]
+
+[[sensors]]
+id = "living_pir"
+kind = "pir"
+zone = "living-room"
+name = "Living room motion"
+
+[[sensors]]
+id = "living_wisense"
+kind = "wisense"
+zone = "living-room"
+name = "Living room wisense"
+
+[[sensors]]
+id = "kitchen_smoke"
+kind = "smoke"
+zone = "kitchen"
+name = "Kitchen smoke detector"
+
+[[sensors]]
+id = "sink_leak"
+kind = "leak"
+zone = "kitchen"
+name = "Sink leak sensor"
+
+[[cameras]]
+id = "front_cam"
+zone = "entrance"
+name = "Front door camera"
+
+[[cameras]]
+id = "living_cam"
+zone = "living-room"
+name = "Living room camera"
+
+[[cameras]]
+id = "garden_cam"
+zone = "garden"
+name = "Garden camera"

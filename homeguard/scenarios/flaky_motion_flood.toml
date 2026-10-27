@@ -1,0 +1,31 @@
+name = "Flaky motion flood"
+description = """
+Armed away. A faulty wisense link reports motion every 5 s for 30 minutes,
+with nothing else seeing anything. Same-kind sources never confirm each
+other: no alarm. Each 20 s window closes unconfirmed, but the silent notice
+is rate-limited to one per 10 minutes: 4 notices (at 0, 10, 20 and 30
+minutes into the flood) instead of 90."""
+config = "config/house.toml"
+until = "40m"
+
+[[step]]
+at = "0s"
+event = { type = "command", command = { arm = "away" }, by = "alice" }
+
+[[step]]
+at = "5m"
+event = { type = "motion_detected", source = "wisense", sensor = "living_wisense" }
+repeat_every = "5s"
+repeat_until = "35m"
+
+[expect]
+final_state = "armed"
+actions = [
+  "state:armed@1m",
+  "alert:low@5m20s",
+  "alert:low@15m20s",
+  "alert:low@25m20s",
+  "alert:low@35m20s",
+]
+never = ["state:pending", "state:triggered", "siren_on", "alert:critical", "alert:high"]
+counts = { "alert:low" = 4 }

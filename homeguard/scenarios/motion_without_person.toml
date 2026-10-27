@@ -1,0 +1,34 @@
+name = "Motion without a person: no alarm"
+description = """
+Armed away. wisense reports motion in the living room (a curtain in the
+draught). The garden camera sees a person (another zone) and the living-room
+camera sees something scoring 0.4 (below 0.7). Nothing confirms the motion:
+no alarm, just two silent "unconfirmed" notices (living room and garden)."""
+config = "config/house.toml"
+until = "6m"
+
+[[step]]
+at = "0s"
+event = { type = "command", command = { arm = "away" }, by = "alice" }
+
+[[step]]
+at = "5m"
+event = { type = "motion_detected", source = "wisense", sensor = "living_wisense" }
+
+[[step]]
+at = "5m5s"
+event = { type = "person_detected", camera = "garden_cam", score = 0.9, snapshot_ref = "garden-1" }
+
+[[step]]
+at = "5m8s"
+event = { type = "person_detected", camera = "living_cam", score = 0.4, snapshot_ref = "living-1" }
+
+[[step]]
+at = "5m12s"
+event = { type = "motion_detected", source = "wisense", sensor = "living_wisense" }
+
+[expect]
+final_state = "armed"
+actions = ["state:armed@1m", "alert:low@5m20s", "alert:low@5m25s"]
+never = ["state:pending", "state:triggered", "siren_on", "alert:critical"]
+counts = { "alert:low" = 2 }

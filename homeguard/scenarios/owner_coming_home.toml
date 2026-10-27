@@ -1,0 +1,46 @@
+name = "Owner coming home"
+description = """
+Armed away. Alice's phone joins the home WiFi at 30m; she opens the front
+door a minute later and walks through the hall and the living room, which
+would otherwise confirm motion (PIR + wisense). With auto-disarm off this is
+"owner arriving": no entry delay, no alarm, a notice to disarm once inside.
+She disarms at 32m."""
+config = "config/house.toml"
+until = "33m"
+
+[[step]]
+at = "0s"
+event = { type = "command", command = { arm = "away" }, by = "alice" }
+
+[[step]]
+at = "30m"
+event = { type = "presence_changed", person = "alice", home = true }
+
+[[step]]
+at = "31m"
+event = { type = "contact_changed", sensor = "front_door", open = true }
+
+[[step]]
+at = "31m5s"
+event = { type = "motion_detected", source = "pir", sensor = "hall_pir" }
+
+[[step]]
+at = "31m10s"
+event = { type = "motion_detected", source = "wisense", sensor = "living_wisense" }
+
+[[step]]
+at = "31m12s"
+event = { type = "motion_detected", source = "pir", sensor = "living_pir" }
+
+[[step]]
+at = "31m20s"
+event = { type = "person_detected", camera = "front_cam", score = 0.95, snapshot_ref = "alice-1" }
+
+[[step]]
+at = "32m"
+event = { type = "command", command = "disarm", by = "alice" }
+
+[expect]
+final_state = "disarmed"
+actions = ["state:armed@1m", "alert:info@31m", "state:disarmed@32m"]
+never = ["state:pending", "state:triggered", "siren_on", "alert:critical", "alert:high"]

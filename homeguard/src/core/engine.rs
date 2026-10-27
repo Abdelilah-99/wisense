@@ -438,7 +438,7 @@ impl Engine {
             self.last_notice.insert(zone.to_string(), at);
             actions.push(Action::SendAlert {
                 level: AlertLevel::Low,
-                text: format!("Unconfirmed: {summary}. No alarm."),
+                text: format!("U{}. No alarm.", &summary[1..]),
                 snapshot_ref: window.person.and_then(|(_, snapshot)| snapshot),
             });
         }

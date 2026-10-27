@@ -51,6 +51,16 @@ enum Command {
         )]
         config: PathBuf,
     },
+    /// Replay a scenario through the real core: no MQTT, no hardware; alerts
+    /// are printed instead of sent.
+    Simulate {
+        /// The scenario file (see scenarios/).
+        scenario: PathBuf,
+        /// Replay this many times faster than real time (e.g. 10). Without
+        /// it the replay is instant.
+        #[arg(long)]
+        speed: Option<f64>,
+    },
     /// Publish `wisense monitor --json` lines from stdin to MQTT.
     BridgeWisense(homeguard::bridge::BridgeArgs),
     /// Exit 0 if a running `homeguard run` is alive (for Docker).
@@ -91,10 +101,54 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::Simulate { scenario, speed } => simulate(&scenario, speed),
         Command::BridgeWisense(args) => {
             let options = args.into_options(|name| std::env::var(name).ok())?;
             tokio::runtime::Runtime::new()?.block_on(homeguard::bridge::run(options))
         }
         Command::Healthcheck { max_age } => homeguard::run::healthcheck(&cli.data_dir, max_age),
+    }
+}
+
+fn simulate(path: &std::path::Path, speed: Option<f64>) -> anyhow::Result<()> {
+    use homeguard::sim;
+
+    if let Some(speed) = speed {
+        if !(speed.is_finite() && speed > 0.0) {
+            anyhow::bail!("--speed must be a positive number, e.g. 10");
+        }
+    }
+    let (scenario, config) = sim::load(path)?;
+    let outcome = sim::simulate(&config, &scenario)?;
+    println!("scenario: {}", scenario.name);
+    if let Some(description) = &scenario.description {
+        println!("{}", description.trim());
+    }
+    println!();
+    let mut previous = homeguard::core::Ts::ZERO;
+    for record in &outcome.records {
+        if let Some(speed) = speed {
+            let wait = record.at().since(previous).as_secs_f64() / speed;
+            std::thread::sleep(Duration::from_secs_f64(wait));
+            previous = record.at();
+        }
+        println!("{}", sim::format_record(record));
+    }
+    println!();
+    println!("final state: {}", outcome.final_state);
+    match &scenario.expect {
+        None => Ok(()),
+        Some(expect) => {
+            let failures = sim::check(&outcome, expect);
+            if failures.is_empty() {
+                println!("expectations: all met");
+                Ok(())
+            } else {
+                for failure in &failures {
+                    println!("FAILED: {failure}");
+                }
+                anyhow::bail!("{} expectation(s) not met", failures.len())
+            }
+        }
     }
 }

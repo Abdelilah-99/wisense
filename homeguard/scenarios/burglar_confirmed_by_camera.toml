@@ -1,0 +1,24 @@
+name = "Intruder confirmed by a camera"
+description = """
+Armed away. wisense picks up motion in the living room (no door: through a
+window without a contact). Six seconds later the living-room camera sees a
+person: confirmed, the alarm goes off at once, with the snapshot."""
+config = "config/house.toml"
+until = "12m"
+
+[[step]]
+at = "0s"
+event = { type = "command", command = { arm = "away" }, by = "alice" }
+
+[[step]]
+at = "10m"
+event = { type = "motion_detected", source = "wisense", sensor = "living_wisense" }
+
+[[step]]
+at = "10m6s"
+event = { type = "person_detected", camera = "living_cam", score = 0.86, snapshot_ref = "1793051000.123456-k3x9qa" }
+
+[expect]
+final_state = "triggered"
+actions = ["state:armed@1m", "state:triggered@10m6s", "alert:critical@10m6s", "siren_on@10m6s"]
+never = ["state:pending", "alert:low"]
