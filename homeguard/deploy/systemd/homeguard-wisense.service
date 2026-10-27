@@ -1,0 +1,38 @@
+# wisense WiFi motion detection, bridged to homeguard over MQTT.
+#
+# wisense needs the hub's own WiFi card, so it runs on the host, not in
+# Docker. Install (see README, "wisense bridge"):
+#   sudo install -m 0644 deploy/systemd/homeguard-wisense.service /etc/systemd/system/
+#   sudo systemctl edit homeguard-wisense    # set User=, the interface, the zone
+#   sudo systemctl enable --now homeguard-wisense
+#
+# If either side stops, the pipeline ends: the bridge publishes "offline"
+# (homeguard raises a tampering alert while armed) and systemd restarts both.
+
+[Unit]
+Description=wisense motion detection bridged to homeguard
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+# The user whose ~/.config/wisense/baseline.json wisense should use
+# (created by `wisense calibrate`). Replace REPLACE_ME with that user name.
+User=REPLACE_ME
+# MQTT_HOMEGUARD_USER and MQTT_HOMEGUARD_PASSWORD, readable by root only:
+#   sudo install -m 0600 /dev/null /etc/homeguard/wisense-bridge.env
+EnvironmentFile=/etc/homeguard/wisense-bridge.env
+Environment=IFACE=wlp2s0 ZONE=living-room
+ExecStart=/bin/sh -c '/usr/local/bin/wisense monitor --json --iface "$IFACE" | exec /usr/local/bin/homeguard-wisense-bridge --zone "$ZONE" --link "$IFACE"'
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

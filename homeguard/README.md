@@ -235,6 +235,81 @@ cargo run -- run --log debug
 Diagnostics go to stderr. `homeguard healthcheck` (used by Docker) succeeds
 while the core loop is alive.
 
+## wisense bridge
+
+[wisense](../README.md) detects motion from the hub's own WiFi card, so it runs
+on the host rather than in Docker. `homeguard-wisense-bridge` (also available
+as `homeguard bridge-wisense`) reads its `monitor --json` output and publishes
+it on `homeguard/wisense/<link_id>`:
+
+```sh
+wisense monitor --json | homeguard-wisense-bridge --zone living-room --link wlp2s0
+```
+
+| wisense event | Published |
+|---|---|
+| `MotionStarted` | `{"type":"motion",...}`: a wisense motion source for the fusion rules |
+| `MotionEnded` | `{"type":"motion_ended",...}`: logged only |
+| `ZoneChanged` (with a zone) | motion on the link named by the zone |
+| `Status`, calibration events | `{"type":"heartbeat"}`, at most every 10 s per link |
+| no line for 30 s, end of input, or the bridge killed | `{"type":"offline"}` |
+
+`--link` sets an MQTT last will, so homeguard hears "offline" even if the
+bridge itself is killed. A wisense link that stays offline while armed is a
+tampering alert. At the end of its input the bridge exits with an error, so
+the service manager restarts the pipeline.
+
+The bridge logs in with `MQTT_HOMEGUARD_USER` / `MQTT_HOMEGUARD_PASSWORD`
+from its environment (`--username-env` / `--password-env` change the names)
+and connects to `127.0.0.1:1883` (`--mqtt-host`, `--mqtt-port`). Other
+options: `--silence-timeout` (30 s) and `--heartbeat` (10 s).
+
+In [config/homeguard.toml](config/homeguard.toml), declare the link as a
+sensor and map it:
+
+```toml
+[[sensors]]
+id = "living_room_wisense"
+kind = "wisense"
+zone = "living-room"
+
+[wisense.links]
+wlp2s0 = "living_room_wisense"
+```
+
+### As a systemd service on the hub
+
+```sh
+# from the repository root: build and install both binaries
+cargo build --release
+sudo install -m 0755 target/release/wisense /usr/local/bin/
+(cd homeguard && cargo build --release --bin homeguard-wisense-bridge)
+sudo install -m 0755 homeguard/target/release/homeguard-wisense-bridge /usr/local/bin/
+
+# calibrate wisense once, as the user the service will run as, with the room empty
+wisense calibrate
+
+# the MQTT login, readable by root only
+sudo install -d -m 0755 /etc/homeguard
+sudo install -m 0600 /dev/null /etc/homeguard/wisense-bridge.env
+sudoedit /etc/homeguard/wisense-bridge.env
+#   MQTT_HOMEGUARD_USER=homeguard
+#   MQTT_HOMEGUARD_PASSWORD=<the value from homeguard/.env>
+
+sudo install -m 0644 homeguard/deploy/systemd/homeguard-wisense.service /etc/systemd/system/
+sudo systemctl edit homeguard-wisense
+#   [Service]
+#   User=<your user>
+#   Environment=IFACE=wlp2s0 ZONE=living-room
+sudo systemctl enable --now homeguard-wisense
+journalctl -u homeguard-wisense -f
+```
+
+The unit ([deploy/systemd/homeguard-wisense.service](deploy/systemd/homeguard-wisense.service))
+runs `wisense monitor --json | homeguard-wisense-bridge` with `Restart=always`;
+if either process dies, both restart. MQTT is reachable on `127.0.0.1:1883`
+because Compose publishes the broker on the host's loopback.
+
 ## Development
 
 Every commit must pass, from `homeguard/`:

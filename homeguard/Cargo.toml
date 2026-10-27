@@ -11,6 +11,14 @@ publish = false
 # Standalone: not a member of the wisense crate at the repository root.
 [workspace]
 
+[[bin]]
+name = "homeguard"
+path = "src/main.rs"
+
+[[bin]]
+name = "homeguard-wisense-bridge"
+path = "src/bin/homeguard-wisense-bridge.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }

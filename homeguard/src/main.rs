@@ -51,6 +51,8 @@ enum Command {
         )]
         config: PathBuf,
     },
+    /// Publish `wisense monitor --json` lines from stdin to MQTT.
+    BridgeWisense(homeguard::bridge::BridgeArgs),
     /// Exit 0 if a running `homeguard run` is alive (for Docker).
     Healthcheck {
         /// Maximum heartbeat age.
@@ -61,7 +63,7 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    init_tracing(&cli.log);
+    homeguard::init_tracing(&cli.log);
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -89,16 +91,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::BridgeWisense(args) => {
+            let options = args.into_options(|name| std::env::var(name).ok())?;
+            tokio::runtime::Runtime::new()?.block_on(homeguard::bridge::run(options))
+        }
         Command::Healthcheck { max_age } => homeguard::run::healthcheck(&cli.data_dir, max_age),
     }
-}
-
-/// Diagnostics go to stderr; stdout stays free for command output.
-fn init_tracing(filter: &str) {
-    let filter = tracing_subscriber::EnvFilter::try_new(filter)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .init();
 }
