@@ -19,6 +19,12 @@ fi
 hits=$(grep_files '[0-9]{8,10}:[A-Za-z0-9_-]{35}')
 [ -n "$hits" ] && fail "possible Telegram bot token:"$'\n'"$hits"
 
+hits=$(grep_files 'discord(app)?\.com/api/webhooks/[0-9]{15,}/[A-Za-z0-9_-]{20,}')
+[ -n "$hits" ] && fail "possible Discord webhook URL:"$'\n'"$hits"
+
+hits=$(grep_files '[MN][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}')
+[ -n "$hits" ] && fail "possible Discord bot token:"$'\n'"$hits"
+
 # MAC addresses, except well-known non-addresses and documentation examples
 # (02:00:00:00:00:xx, and 00:00:5e:00:53:xx reserved by RFC 7042).
 hits=$(grep_files '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' \

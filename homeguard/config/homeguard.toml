@@ -145,6 +145,17 @@ poll_timeout = "30s"
 # Commands sent while homeguard was down are ignored if older than this.
 max_command_age = "2m"
 
+# Discord (see README, "Discord"): alerts through a channel webhook,
+# commands through a bot. Secrets come from .env; nothing set = Discord off.
+[discord]
+webhook_env = "DISCORD_WEBHOOK_URL"
+token_env = "DISCORD_BOT_TOKEN"
+users_env = "DISCORD_ALLOWED_USER_IDS"
+# Optional: only accept commands in these channels.
+channels_env = "DISCORD_ALLOWED_CHANNEL_IDS"
+prefix = "!"
+max_command_age = "2m"
+
 # The dashboard (see README, "Dashboard"). Its password and the disarm PIN
 # come from .env; without the password the dashboard is off.
 [web]

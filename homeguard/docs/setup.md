@@ -169,6 +169,19 @@ any user name and `HOMEGUARD_DASHBOARD_PASSWORD`.
 
    Send `/status` to the bot. It answers with the arm state.
 
+### Or (and) Discord
+
+To get alerts in a Discord channel, and optionally command homeguard from
+Discord, follow the README's "Discord" section: a channel webhook for alerts
+(`DISCORD_WEBHOOK_URL`), a bot with the Message Content intent for commands
+(`DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_USER_IDS`). Then check every channel
+at once:
+
+```sh
+docker compose up -d homeguard
+docker compose run --rm --no-deps homeguard test-alert
+```
+
 ## 8. Add a camera
 
 1. Give the camera a fixed IP (a DHCP reservation, as in step 2), enable RTSP

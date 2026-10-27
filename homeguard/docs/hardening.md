@@ -99,6 +99,11 @@ chmod 600 .env
   Passcode Lock), since `/disarm` needs no PIN.
 - If the bot token leaks, revoke it in @BotFather (`/revoke`) and put the new
   one in `.env`.
+- **Discord**: the webhook URL is a secret (anyone holding it can post in the
+  channel); if it leaks, delete the webhook and create a new one. Reset a
+  leaked bot token in the Developer Portal. Keep `DISCORD_ALLOWED_USER_IDS`
+  short, and set `DISCORD_ALLOWED_CHANNEL_IDS` to a private channel so
+  commands are not accepted where guests can read the replies.
 
 ## 7. Backups
 

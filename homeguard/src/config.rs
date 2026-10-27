@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use crate::core::time::serde_duration;
 use crate::core::{CoreConfig, Engine};
+use crate::discord::DiscordConfig;
 use crate::parse::Mapping;
 use crate::presence::ProbeConfig;
 use crate::telegram::TelegramConfig;
@@ -29,6 +30,7 @@ pub struct AppConfig {
     pub actuators: Actuators,
     pub presence: ProbeConfig,
     pub telegram: TelegramConfig,
+    pub discord: DiscordConfig,
     pub web: WebConfig,
     pub log: LogConfig,
 }
@@ -51,6 +53,8 @@ struct ShellSections {
     presence: ProbeConfig,
     #[serde(default)]
     telegram: TelegramConfig,
+    #[serde(default)]
+    discord: DiscordConfig,
     #[serde(default)]
     web: WebConfig,
     #[serde(default)]
@@ -186,6 +190,7 @@ impl AppConfig {
             actuators: shell.actuators,
             presence: shell.presence,
             telegram: shell.telegram,
+            discord: shell.discord,
             web: shell.web,
             log: shell.log,
         };

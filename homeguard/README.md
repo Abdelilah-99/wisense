@@ -28,7 +28,8 @@ The `homeguard` service is written in Rust and owns:
 - the arm/disarm state machine (exit and entry delays, modes);
 - sensor fusion rules that cut false alarms (motion must be confirmed);
 - phone presence detection (who is home);
-- alerts over Telegram, the event log, and a small web dashboard and API.
+- alerts and commands over Telegram and/or Discord, the event log, and a
+  small web dashboard and API.
 
 ## Architecture
 
@@ -67,9 +68,10 @@ The `homeguard` service is written in Rust and owns:
 
 Every part is built: the Docker Compose stack, the alarm state machine, the
 sensor fusion rules, MQTT, phone presence, the wisense bridge, simulation,
-Telegram alerts and commands, the event log and the dashboard. It is tested
-without hardware (145 automated tests, 7 scenarios, and manual runs against
-a real broker, a real wisense and fake Telegram/Frigate APIs). It has **not
+Telegram and Discord alerts and commands, the event log and the dashboard.
+It is tested without hardware (158 automated tests, 7 scenarios, and manual
+runs against a real broker, a real wisense, a real Discord webhook and fake
+Telegram/Frigate APIs). It has **not
 yet run with real cameras or Zigbee devices**; see
 [docs/testing.md](docs/testing.md) for what that leaves unverified.
 
@@ -291,6 +293,65 @@ app with a passcode, and keep the allow-list short.
 Run `homeguard run --dry-run` to log alerts without sending them (Telegram
 commands are off too). Without `TELEGRAM_BOT_TOKEN`, homeguard runs but only
 logs its alerts, with a warning at startup. The token is never logged.
+
+## Discord
+
+Discord can do what Telegram does, alongside it or instead of it: alerts
+arrive through a **channel webhook**, and a **bot** answers commands. Both
+are optional and independent.
+
+### Alerts (webhook)
+
+1. In your Discord server: *channel settings → Integrations → Webhooks →
+   New Webhook*, then *Copy Webhook URL*.
+2. Put it in `.env` as `DISCORD_WEBHOOK_URL`. Treat it like a password:
+   anyone with the URL can post in that channel. If it leaks, delete the
+   webhook and create a new one.
+3. `docker compose up -d homeguard`, then check delivery:
+
+   ```sh
+   docker compose run --rm --no-deps homeguard test-alert
+   ```
+
+Alerts use the same markers as Telegram, low-priority notices are delivered
+silently, and alarms carry the Frigate snapshot as an image. Messages never
+ping anyone (`@everyone` in a sensor name stays plain text). Rate limits
+(`retry_after`) are honoured, and failures are retried up to 5 times.
+
+### Commands (bot)
+
+1. In the [Discord Developer Portal](https://discord.com/developers/applications):
+   *New Application* → *Bot*: *Reset Token* and copy it into `.env` as
+   `DISCORD_BOT_TOKEN`. On the same page, enable **Message Content Intent**.
+2. *OAuth2 → URL Generator*: scope `bot`, permissions *View Channels*, *Send
+   Messages*, *Attach Files*. Open the generated URL and add the bot to your
+   server.
+3. In Discord, *User Settings → Advanced → Developer Mode* on; then
+   right-click your name → *Copy User ID*. Put the ids of everyone allowed to
+   command the bot in `DISCORD_ALLOWED_USER_IDS` (comma-separated).
+4. Optionally restrict commands to some channels (right-click a channel →
+   *Copy Channel ID*) with `DISCORD_ALLOWED_CHANNEL_IDS`. With no webhook, the
+   bot posts alerts in those channels instead.
+5. `docker compose up -d homeguard` and send `!status` in a channel the bot
+   can see, or in a direct message to it.
+
+| Command | |
+|---|---|
+| `!status` | arm state, cause, devices offline, open doors, who is home |
+| `!arm away`, `!arm home`, `!arm night` | arm (after the exit delay) |
+| `!disarm` | disarm |
+| `!snapshot <camera>` | the latest picture from a camera |
+| `!events` | the last 10 events |
+| `!help` | the list |
+
+The bot connects *out* to Discord's gateway (a WebSocket), like Telegram's
+polling, so nothing on the hub is exposed. Only allow-listed users, in
+allow-listed channels when a channel list is set, are answered. Messages from
+everyone else are ignored and logged, messages from bots are ignored, and
+commands sent while homeguard was down are ignored after 2 minutes. As on
+Telegram, `!disarm` needs no PIN, so keep the user list short. If the token
+is wrong or the Message Content intent is off, homeguard logs why and stops
+the bot rather than retrying forever.
 
 ## Dashboard
 

@@ -66,6 +66,17 @@ enum Command {
     },
     /// Publish `wisense monitor --json` lines from stdin to MQTT.
     BridgeWisense(homeguard::bridge::BridgeArgs),
+    /// Send one test message to every configured alert channel (Telegram,
+    /// Discord) and report each result.
+    TestAlert {
+        #[arg(
+            long,
+            short,
+            env = "HOMEGUARD_CONFIG",
+            default_value = "config/homeguard.toml"
+        )]
+        config: PathBuf,
+    },
     /// Exit 0 if a running `homeguard run` is alive (for Docker).
     Healthcheck {
         /// Maximum heartbeat age.
@@ -112,6 +123,28 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::BridgeWisense(args) => {
             let options = args.into_options(|name| std::env::var(name).ok())?;
             tokio::runtime::Runtime::new()?.block_on(homeguard::bridge::run(options))
+        }
+        Command::TestAlert { config } => {
+            let config = AppConfig::load(&config)?;
+            let results =
+                tokio::runtime::Runtime::new()?.block_on(homeguard::run::test_alert(&config))?;
+            if results.is_empty() {
+                anyhow::bail!("no alert channel configured (Telegram or Discord, see .env)");
+            }
+            let mut failed = 0;
+            for (channel, outcome) in &results {
+                match outcome {
+                    Ok(()) => println!("{channel}: sent"),
+                    Err(e) => {
+                        failed += 1;
+                        println!("{channel}: FAILED: {e}");
+                    }
+                }
+            }
+            if failed > 0 {
+                anyhow::bail!("{failed} of {} channel(s) failed", results.len());
+            }
+            Ok(())
         }
         Command::Healthcheck { max_age } => homeguard::run::healthcheck(&cli.data_dir, max_age),
     }

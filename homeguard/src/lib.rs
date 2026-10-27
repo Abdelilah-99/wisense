@@ -8,10 +8,15 @@
 //!   [`db`], [`web`]: the imperative shell.
 
 pub mod bridge;
+pub mod chat;
 pub mod config;
 pub mod core;
 pub mod db;
+pub mod delivery;
+pub mod discord;
+pub mod frigate;
 pub mod mqtt;
+pub mod notify;
 pub mod parse;
 pub mod presence;
 pub mod publish;

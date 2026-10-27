@@ -35,8 +35,9 @@ use tracing::{info, warn};
 
 use crate::core::{Command, Mode, Ts};
 use crate::db::EventLog;
+use crate::frigate::FrigateClient;
+use crate::notify::safe_path_segment;
 use crate::run::{Clock, CoreHandle};
-use crate::telegram::command::safe_path_segment;
 use auth::{basic_auth_ok, constant_time_eq, Throttle};
 
 const DASHBOARD: &str = include_str!("dashboard.html");
@@ -70,8 +71,7 @@ pub struct WebState {
     pub log: EventLog,
     pub password: String,
     pub pin: Option<String>,
-    pub frigate_url: String,
-    pub http: reqwest::Client,
+    pub frigate: FrigateClient,
     pub clock: Clock,
     /// Wrong dashboard passwords.
     logins: Mutex<Throttle>,
@@ -93,10 +93,7 @@ impl WebState {
             log,
             password,
             pin,
-            frigate_url: frigate_url.trim_end_matches('/').to_string(),
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()?,
+            frigate: FrigateClient::new(frigate_url)?,
             clock: Clock::start(),
             logins: Mutex::new(lockout()),
             pins: Mutex::new(lockout()),
@@ -333,15 +330,7 @@ async fn snapshot(State(state): State<Arc<WebState>>, Path(id): Path<String>) ->
     if !safe_path_segment(&id) {
         return error(StatusCode::BAD_REQUEST, "bad snapshot id");
     }
-    let url = format!("{}/api/events/{id}/snapshot.jpg", state.frigate_url);
-    let fetched = async {
-        let response = state.http.get(&url).send().await.ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-        response.bytes().await.ok()
-    }
-    .await;
+    let fetched = state.frigate.event_snapshot(&id).await.ok();
     match fetched {
         Some(bytes) => ([(header::CONTENT_TYPE, "image/jpeg")], Body::from(bytes)).into_response(),
         None => error(StatusCode::NOT_FOUND, "snapshot unavailable"),

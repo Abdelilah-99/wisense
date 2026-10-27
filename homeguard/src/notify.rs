@@ -1,9 +1,24 @@
-//! Telegram bot commands, authorization and message texts. Pure.
+//! What the chat bots (Telegram, Discord) have in common: the alert sent
+//! to them, their commands, authorization and message texts. Pure.
+//!
+//! Commands are the same on every bot; only the prefix differs (`/status`
+//! on Telegram, `!status` on Discord).
+
+use std::str::FromStr;
 
 use thiserror::Error;
 
 use crate::core::{AlertLevel, Mode};
 use crate::status::{LogLine, Status};
+
+/// An alert for the delivery workers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Alert {
+    pub level: AlertLevel,
+    pub text: String,
+    /// A Frigate event id whose snapshot to attach.
+    pub snapshot_ref: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BotCommand {
@@ -19,12 +34,12 @@ pub enum BotCommand {
 pub enum CommandError {
     #[error("not a command")]
     NotACommand,
-    /// `/cmd@other_bot` in a group: meant for another bot, stay silent.
+    /// `/cmd@other_bot` in a Telegram group: meant for another bot, stay silent.
     #[error("addressed to another bot")]
     OtherBot,
-    #[error("unknown command /{0}")]
+    #[error("unknown command {0:?}")]
     Unknown(String),
-    #[error("/{command} needs {what}")]
+    #[error("{command} needs {what}")]
     MissingArgument {
         command: &'static str,
         what: &'static str,
@@ -33,12 +48,16 @@ pub enum CommandError {
     BadMode(String),
 }
 
-/// Parses `/arm away`, `/arm@homeguard_bot night`, `/STATUS`, ...
-/// `bot_username` (without `@`) lets addressed commands for other bots be
-/// ignored.
-pub fn parse_command(text: &str, bot_username: Option<&str>) -> Result<BotCommand, CommandError> {
+/// Parses `/arm away`, `/arm@homeguard_bot night`, `!STATUS`, ... after
+/// `prefix`. `bot_username` (without `@`) lets Telegram commands addressed
+/// to other bots be ignored.
+pub fn parse_command(
+    text: &str,
+    prefix: char,
+    bot_username: Option<&str>,
+) -> Result<BotCommand, CommandError> {
     let text = text.trim();
-    let Some(rest) = text.strip_prefix('/') else {
+    let Some(rest) = text.strip_prefix(prefix) else {
         return Err(CommandError::NotACommand);
     };
     let mut words = rest.split_whitespace();
@@ -77,35 +96,40 @@ pub fn parse_command(text: &str, bot_username: Option<&str>) -> Result<BotComman
     }
 }
 
-/// Parses the allow-list: chat ids separated by commas or spaces.
-pub fn parse_chat_ids(text: &str) -> Result<Vec<i64>, String> {
-    let ids: Result<Vec<i64>, String> = text
+/// Parses an allow-list of ids (Telegram chat ids, Discord user or channel
+/// ids) separated by commas or spaces. `what` names them in errors.
+pub fn parse_ids<T: FromStr>(text: &str, what: &str) -> Result<Vec<T>, String> {
+    let ids: Result<Vec<T>, String> = text
         .split(|c: char| c == ',' || c.is_whitespace())
         .filter(|s| !s.is_empty())
         .map(|s| {
-            s.parse::<i64>().map_err(|_| {
-                format!("{s:?} is not a Telegram chat id (a number such as 123456789)")
-            })
+            s.parse::<T>()
+                .map_err(|_| format!("{s:?} is not a {what} (a number such as 123456789)"))
         })
         .collect();
     let ids = ids?;
     if ids.is_empty() {
-        return Err("no chat id given".into());
+        return Err(format!("no {what} given"));
     }
     Ok(ids)
 }
 
-/// Only chats in the allow-list may command the bot.
-pub fn is_allowed(chat_id: i64, allowed: &[i64]) -> bool {
-    allowed.contains(&chat_id)
+/// Only allow-listed ids may command a bot.
+pub fn is_allowed<T: PartialEq>(id: T, allowed: &[T]) -> bool {
+    allowed.contains(&id)
 }
 
-pub const HELP: &str = "homeguard commands:
-/status - arm state, devices offline, who is home
-/arm away|home|night - arm (after the exit delay)
-/disarm - disarm
-/snapshot <camera> - a picture from a camera
-/events - the last 10 events";
+/// The command list, with the bot's prefix.
+pub fn help(prefix: char) -> String {
+    format!(
+        "homeguard commands:
+{prefix}status - arm state, devices offline, who is home
+{prefix}arm away|home|night - arm (after the exit delay)
+{prefix}disarm - disarm
+{prefix}snapshot <camera> - a picture from a camera
+{prefix}events - the last 10 events"
+    )
+}
 
 /// An alert as sent: a marker for the level, then the text.
 pub fn format_alert(level: AlertLevel, text: &str) -> String {
@@ -216,7 +240,7 @@ mod tests {
 
     #[test]
     fn parses_commands() {
-        let p = |t| parse_command(t, Some("homeguard_bot"));
+        let p = |t| parse_command(t, '/', Some("homeguard_bot"));
         assert_eq!(p("/status"), Ok(BotCommand::Status));
         assert_eq!(p("  /STATUS  "), Ok(BotCommand::Status));
         assert_eq!(p("/arm away"), Ok(BotCommand::Arm(Mode::Away)));
@@ -241,7 +265,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_commands() {
-        let p = |t| parse_command(t, Some("homeguard_bot"));
+        let p = |t| parse_command(t, '/', Some("homeguard_bot"));
         assert_eq!(p("hello"), Err(CommandError::NotACommand));
         assert_eq!(p(""), Err(CommandError::NotACommand));
         assert_eq!(p("/arm@other_bot away"), Err(CommandError::OtherBot));
@@ -260,19 +284,35 @@ mod tests {
         ));
         assert_eq!(p("/"), Err(CommandError::Unknown(String::new())));
         // Without knowing our own name, addressed commands are accepted.
-        assert_eq!(parse_command("/status@x", None), Ok(BotCommand::Status));
+        assert_eq!(
+            parse_command("/status@x", '/', None),
+            Ok(BotCommand::Status)
+        );
+        // Another prefix: Discord.
+        assert_eq!(
+            parse_command("!arm Night", '!', None),
+            Ok(BotCommand::Arm(Mode::Night))
+        );
+        assert_eq!(
+            parse_command("/status", '!', None),
+            Err(CommandError::NotACommand)
+        );
     }
 
     #[test]
     fn authorization() {
-        let allowed = parse_chat_ids("123456789, -1001234567890 42").unwrap();
+        let allowed: Vec<i64> = parse_ids("123456789, -1001234567890 42", "chat id").unwrap();
         assert_eq!(allowed, vec![123_456_789, -1_001_234_567_890, 42]);
         assert!(is_allowed(42, &allowed));
         assert!(is_allowed(-1_001_234_567_890, &allowed));
         assert!(!is_allowed(43, &allowed));
-        assert!(!is_allowed(0, &[]));
-        assert!(parse_chat_ids("").is_err());
-        assert!(parse_chat_ids("12, abc").is_err());
+        assert!(!is_allowed(0_i64, &[]));
+        assert!(parse_ids::<i64>("", "chat id").is_err());
+        assert!(parse_ids::<i64>("12, abc", "chat id").is_err());
+        // Discord snowflakes are unsigned 64-bit.
+        let users: Vec<u64> = parse_ids("80351110224678912", "user id").unwrap();
+        assert!(is_allowed(80_351_110_224_678_912, &users));
+        assert!(parse_ids::<u64>("-5", "user id").is_err());
     }
 
     #[test]

@@ -37,7 +37,9 @@ How homeguard is put together and why. For using it, see the
 ```
 
 Everything runs on the hub. The only traffic leaving the house is homeguard's
-outgoing HTTPS to Telegram.
+outgoing connections to Telegram and Discord (HTTPS, and the Discord bot's
+gateway WebSocket), whichever are configured. Alerts fan out to one queue per
+channel, so a slow or failing service never holds up another.
 
 ## MQTT topics
 
@@ -83,7 +85,13 @@ src/
 ├── mqtt.rs          connection, reconnect with backoff, publish without waiting
 ├── presence.rs      LAN probing (ARP table, ping, UDP), feeds the tracker
 ├── bridge.rs        the wisense bridge (pure Bridge + stdin/MQTT shell)
-├── telegram/        command.rs (pure parsing, authorization, texts), mod.rs (Bot API I/O)
+├── notify.rs        pure: bot commands for any prefix, authorization, alert and status texts
+├── chat.rs          runs a bot command against the core (shared by both bots)
+├── delivery.rs      retry with backoff and rate limits, secrets scrubbed from errors
+├── frigate.rs       Frigate snapshots (alerts, /snapshot, the dashboard proxy)
+├── telegram/        Bot API: alert worker, long-polling command loop
+├── discord/         gateway.rs (pure protocol: frames, heartbeats, authorization),
+│                    mod.rs (webhook and bot REST, alert worker, gateway session)
 ├── db.rs            SQLite event log (sqlx, migrations/), batched writer, pruning
 ├── web/             axum API and dashboard; auth.rs (pure Basic auth, throttling)
 ├── main.rs          CLI: run, check-config, simulate, bridge-wisense, healthcheck
@@ -198,10 +206,16 @@ auto-arm and auto-disarm are off by default.
 - **Secrets are named, not written.** Config files name environment
   variables (`password_env = "…"`); values live in `.env` only. Telegram
   errors are stripped of their URL, which contains the bot token.
-- **Telegram commands have no PIN, the dashboard does.** The Telegram
-  allow-list and the phone's own lock are the protection; a browser on the
-  LAN gets a password and a PIN, with lockouts. Commands Telegram queued while
-  the hub was down are ignored after 2 minutes.
+- **Chat commands have no PIN, the dashboard does.** The Telegram and Discord
+  allow-lists and the phone's own lock are the protection; a browser on the
+  LAN gets a password and a PIN, with lockouts. Commands queued while the hub
+  was down are ignored after 2 minutes (Telegram's message date, Discord's
+  snowflake timestamp).
+- **Discord: webhook for alerts, bot for commands.** A webhook can only post,
+  so commands need a bot. It uses the gateway WebSocket (outbound) with
+  prefix commands rather than slash-command interactions, which keeps it
+  simple, at the cost of the privileged Message Content intent (a toggle
+  for a bot in your own server).
 - **Unknown sensors never trigger.** An event for an id not in the config is
   logged and ignored, so a typo cannot cause a false alarm (it can hide a
   sensor; `check-config` and the dashboard show what is configured).

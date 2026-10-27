@@ -54,7 +54,7 @@ test picks it up automatically.
 
 ## What the tests cover
 
-**145 tests**: 135 unit tests next to the code and 10 integration tests in
+**158 tests**: 145 unit tests next to the code and 13 integration tests in
 `tests/` (one of which runs all 7 scenarios).
 
 | Area | Tests | What they pin down |
@@ -68,7 +68,9 @@ test picks it up automatically.
 | `publish`, `status` | 5 | retained state JSON with Home Assistant states; siren and plug commands; the dashboard/Telegram snapshot |
 | `bridge` | 6 | wisense lines to messages, heartbeat rate limit per link, zone changes, silence → offline once then recovery, unknown events and garbage |
 | `presence` (shell) | 2 | MACs required from the environment; sightings need a resolved ARP entry |
-| `telegram::*` | 7 | command parsing (`/arm@bot away`, case, other bots, errors); allow-list parsing and authorization; status/event texts; path-safety of snapshot ids; credentials; stale commands |
+| `notify`, `telegram`, `delivery` | 9 | command parsing for both prefixes (`/arm@bot away`, `!arm night`, case, other bots, errors); allow-list parsing (Telegram chat ids, Discord snowflakes) and authorization; status/event texts; path-safety of snapshot ids; Telegram credentials and stale commands; retry with backoff and `retry_after` on a paused clock |
+| `discord::*` | 8 | gateway frames (Hello, dispatch, heartbeat request/ack, reconnect, invalid session), identify and heartbeat payloads, intents, snowflake timestamps, authorization (user, channel, bots, stale), the 2000-character limit, credentials, payloads that never ping |
+| `tests/discord.rs` | 3 | the real bot against an in-process fake Discord (WebSocket gateway + REST): identify, heartbeats including on request, only allow-listed fresh commands reaching the core, replies to the right channel with the bot token, a 429 retried, reconnecting when asked; webhook JSON, silent and multipart photo messages; errors never contain the webhook secret |
 | `web::*` | 13 | Basic auth, constant-time comparison, lockouts; the API with an in-memory database: login required, status, events and limits, arm, disarm PIN, lockouts for passwords and for PINs separately, CSRF (origin, non-JSON bodies), snapshot id validation, self-contained page |
 | `db` | 4 | insert, newest-first listing, pruning, batched writer, reopening a file |
 | `config`, `run`, `mqtt` | 10 | config defaults, credentials from the environment, unknown keys and bad mappings rejected; heartbeat freshness; arm state persisted across restarts; reconnect backoff |
@@ -95,6 +97,9 @@ laptop, and are worth repeating after significant changes:
   fake one (away exactly at the grace period).
 - **Telegram**: a local fake of the Bot API (rate limit and `retry_after`,
   multipart photos, foreign and stale commands, the token never in logs).
+- **Discord**: `homeguard test-alert` delivered a message through a real
+  channel webhook. The bot was only run against the fake gateway in
+  `tests/discord.rs`.
 - **The dashboard**: a headless browser screenshot against a live instance.
 
 ## What cannot be tested without the hardware
@@ -105,7 +110,8 @@ laptop, and are worth repeating after significant changes:
   response to the `warning` command, availability timing.
 - Presence with real phones: how long each phone model stays silent, and
   whether 10 minutes of grace is right for your household.
-- Telegram's real API (the fake follows the documented behaviour).
+- Telegram's real API and Discord's real gateway (the fakes follow the
+  documented behaviour; only the Discord webhook was used for real).
 - Behaviour over days: retention pruning, long-running reconnections.
 
 Before trusting the system, do the "first alert" test in

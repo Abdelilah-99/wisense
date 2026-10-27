@@ -4,7 +4,7 @@
 //! the ticker) sends it events or commands over channels; it stamps each
 //! with the current time, runs the core, and dispatches the resulting
 //! actions. Dispatch never waits on the network (alerts are queued for the
-//! Telegram worker, MQTT messages for the client), so a slow broker or API
+//! Telegram and Discord workers, MQTT messages for the client), so a slow broker or API
 //! cannot delay a decision. After each event the core publishes a
 //! [`Snapshot`] that the Telegram bot and the dashboard read.
 
@@ -19,10 +19,13 @@ use tracing::{error, info, warn};
 use crate::config::AppConfig;
 use crate::core::{Action, AlertLevel, Command, Engine, Event, Input, Mode, State, Ts};
 use crate::db::{EventLog, NewEvent};
+use crate::discord;
+use crate::frigate::FrigateClient;
 use crate::mqtt::{self, Connection};
+use crate::notify::Alert;
 use crate::publish::{state_message, Outgoing, Publisher, AVAILABILITY_TOPIC};
 use crate::status::{LogLine, RecentLog, Status};
-use crate::telegram::{self, Alert};
+use crate::telegram;
 
 /// How often time is fed to the core when nothing else happens.
 const TICK: Duration = Duration::from_millis(500);
@@ -133,7 +136,7 @@ impl CoreHandle {
 
 pub struct RunOptions {
     pub data_dir: PathBuf,
-    /// Log alerts instead of sending them to Telegram.
+    /// Log alerts instead of sending them to Telegram or Discord.
     pub dry_run: bool,
 }
 
@@ -143,18 +146,19 @@ pub async fn run(config: AppConfig, options: RunOptions) -> anyhow::Result<()> {
     let mut engine = config.engine()?;
     let phones = config.presence.phones(env)?;
     let sweep = config.presence.sweep()?;
-    let telegram = if options.dry_run {
-        warn!("dry run: alerts are logged, not sent to Telegram, and Telegram commands are off");
-        None
+    let (telegram, discord) = if options.dry_run {
+        warn!("dry run: alerts are logged, not sent; Telegram and Discord commands are off");
+        (None, discord::Credentials::default())
     } else {
-        let credentials = config.telegram.credentials(env).context("Telegram")?;
-        if credentials.is_none() {
+        let telegram = config.telegram.credentials(env).context("Telegram")?;
+        let discord = config.discord.credentials(env).context("Discord")?;
+        if telegram.is_none() && discord.webhook.is_none() && discord.bot.is_none() {
             warn!(
-                "{} is not set: Telegram is OFF, alerts are only logged",
-                config.telegram.token_env
+                "neither {} nor {} is set: alerts are only logged",
+                config.telegram.token_env, config.discord.webhook_env
             );
         }
-        credentials
+        (telegram, discord)
     };
     let data_dir = options.data_dir;
     std::fs::create_dir_all(&data_dir)
@@ -197,26 +201,59 @@ pub async fn run(config: AppConfig, options: RunOptions) -> anyhow::Result<()> {
             events_tx.clone(),
         ));
     }
-    let alerts = match telegram {
-        Some(credentials) => {
-            let bot =
-                telegram::Bot::new(&config.telegram, &credentials.token, &config.frigate.url)?;
-            let (alerts_tx, alerts_rx) = mpsc::channel::<Alert>(256);
-            tokio::spawn(telegram::alert_worker(
-                bot.clone(),
-                credentials.chats.clone(),
-                alerts_rx,
-            ));
-            tokio::spawn(telegram::command_loop(
-                bot,
-                config.telegram.clone(),
-                credentials.chats,
-                handle.clone(),
-            ));
-            Some(alerts_tx)
+    let frigate = FrigateClient::new(&config.frigate.url)?;
+    let mut alerts = Vec::new();
+    if let Some(credentials) = telegram {
+        let bot = telegram::Bot::new(&config.telegram, &credentials.token, &config.frigate.url)?;
+        let (alerts_tx, alerts_rx) = mpsc::channel::<Alert>(256);
+        tokio::spawn(telegram::alert_worker(
+            bot.clone(),
+            credentials.chats.clone(),
+            alerts_rx,
+        ));
+        tokio::spawn(telegram::command_loop(
+            bot,
+            config.telegram.clone(),
+            credentials.chats,
+            handle.clone(),
+        ));
+        alerts.push(alerts_tx);
+    }
+    let rest = discord::Rest::new(
+        &config.discord,
+        discord.bot.as_ref().map(|b| b.token.as_str()),
+    )?;
+    let discord_target = match (&discord.webhook, &discord.bot) {
+        (Some(url), _) => Some(discord::AlertTarget::Webhook(url.clone())),
+        (None, Some(bot)) if !bot.channels.is_empty() => {
+            Some(discord::AlertTarget::Channels(bot.channels.clone()))
         }
-        None => None,
+        _ => None,
     };
+    if let Some(target) = discord_target {
+        let (alerts_tx, alerts_rx) = mpsc::channel::<Alert>(256);
+        tokio::spawn(discord::alert_worker(
+            rest.clone(),
+            target,
+            frigate.clone(),
+            alerts_rx,
+        ));
+        alerts.push(alerts_tx);
+    } else if discord.bot.is_some() {
+        warn!(
+            "Discord bot without {} or {}: it answers commands but sends no alerts",
+            config.discord.webhook_env, config.discord.channels_env
+        );
+    }
+    if let Some(bot) = discord.bot {
+        tokio::spawn(discord::bot_loop(
+            config.discord.clone(),
+            bot,
+            rest,
+            handle.clone(),
+            frigate,
+        ));
+    }
     match web_password {
         Some(password) => {
             if web_pin.is_none() {
@@ -254,7 +291,7 @@ pub async fn run(config: AppConfig, options: RunOptions) -> anyhow::Result<()> {
         broker = %format!("{}:{}", config.mqtt.host, config.mqtt.port),
         sensors = engine.catalog().sensors().count(),
         cameras = engine.catalog().cameras().count(),
-        telegram = alerts.is_some(),
+        alert_channels = alerts.len(),
         "homeguard started"
     );
 
@@ -385,8 +422,9 @@ struct Dispatcher {
     client: AsyncClient,
     publisher: Publisher,
     data_dir: PathBuf,
-    /// `None` when Telegram is off or in dry-run mode.
-    alerts: Option<mpsc::Sender<Alert>>,
+    /// One queue per alert channel (Telegram, Discord); empty when none is
+    /// configured or in dry-run mode.
+    alerts: Vec<mpsc::Sender<Alert>>,
     log: mpsc::Sender<NewEvent>,
 }
 
@@ -394,7 +432,7 @@ impl Dispatcher {
     fn dispatch(&mut self, actions: &[Action], recent: &mut RecentLog) {
         let now = unix_ms();
         for action in actions {
-            log_action(action, self.alerts.is_some());
+            log_action(action, !self.alerts.is_empty());
             self.record(NewEvent::action(now, action));
             if let Some(line) = LogLine::from_action(now, action) {
                 recent.push(line);
@@ -410,14 +448,14 @@ impl Dispatcher {
                     text,
                     snapshot_ref,
                 } => {
-                    if let Some(alerts) = &self.alerts {
-                        let alert = Alert {
-                            level: *level,
-                            text: text.clone(),
-                            snapshot_ref: snapshot_ref.clone(),
-                        };
-                        if let Err(e) = alerts.try_send(alert) {
-                            error!(error = %e, "Telegram alert queue full; alert dropped");
+                    let alert = Alert {
+                        level: *level,
+                        text: text.clone(),
+                        snapshot_ref: snapshot_ref.clone(),
+                    };
+                    for queue in &self.alerts {
+                        if let Err(e) = queue.try_send(alert.clone()) {
+                            error!(error = %e, "alert queue full; alert dropped");
                         }
                     }
                 }
@@ -450,7 +488,7 @@ impl Dispatcher {
 
 fn log_action(action: &Action, sending: bool) {
     let note = match action {
-        Action::SendAlert { .. } if !sending => " (not sent: Telegram off)",
+        Action::SendAlert { .. } if !sending => " (not sent: no alert channel)",
         _ => "",
     };
     match action {
@@ -458,6 +496,47 @@ fn log_action(action: &Action, sending: bool) {
         Action::SirenOn => warn!("{action}"),
         _ => info!("{action}{note}"),
     }
+}
+
+/// `homeguard test-alert`: sends one message to every configured alert
+/// channel and reports each result, as `(channel, outcome)`.
+pub async fn test_alert(config: &AppConfig) -> anyhow::Result<Vec<(String, Result<(), String>)>> {
+    let env = |name: &str| std::env::var(name).ok();
+    let text = crate::notify::format_alert(
+        AlertLevel::Info,
+        "Test alert from homeguard: this channel receives alerts.",
+    );
+    let mut results = Vec::new();
+    if let Some(credentials) = config.telegram.credentials(env).context("Telegram")? {
+        let bot = telegram::Bot::new(&config.telegram, &credentials.token, &config.frigate.url)?;
+        for chat in credentials.chats {
+            results.push((
+                format!("Telegram chat {chat}"),
+                bot.send_text(chat, &text).await,
+            ));
+        }
+    }
+    let discord = config.discord.credentials(env).context("Discord")?;
+    let rest = discord::Rest::new(
+        &config.discord,
+        discord.bot.as_ref().map(|b| b.token.as_str()),
+    )?;
+    if let Some(url) = &discord.webhook {
+        let outcome = crate::delivery::with_retry(|| rest.webhook(url, &text, None, false))
+            .await
+            .map_err(|e| e.to_string());
+        results.push(("Discord webhook".to_string(), outcome));
+    } else if let Some(bot) = &discord.bot {
+        for channel in &bot.channels {
+            let channel = channel.to_string();
+            let outcome =
+                crate::delivery::with_retry(|| rest.create_message(&channel, &text, None, false))
+                    .await
+                    .map_err(|e| e.to_string());
+            results.push((format!("Discord channel {channel}"), outcome));
+        }
+    }
+    Ok(results)
 }
 
 /// The mode to restore after a restart: whatever the system is armed (or

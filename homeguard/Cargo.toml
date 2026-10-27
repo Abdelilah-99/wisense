@@ -28,6 +28,9 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 # Telegram Bot API (HTTPS, rustls) and Frigate snapshots.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "multipart"] }
+# The Discord bot's gateway connection (a WebSocket over TLS, outbound).
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # Plain TCP to the broker on loopback: no TLS stack needed.
 rumqttc = { version = "0.25", default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -40,5 +43,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "std", "env-filter"] }
 
 [dev-dependencies]
+# A paused clock, so retry and backoff tests run instantly.
+tokio = { version = "1", features = ["test-util"] }
+# The fake Discord gateway in tests/discord.rs (server side).
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
 # Drives the axum router in API tests without a socket.
 tower = { version = "0.5", features = ["util"] }

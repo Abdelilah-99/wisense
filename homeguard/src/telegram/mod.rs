@@ -10,8 +10,6 @@
 //! of every API URL, so errors are always stripped of their URL before they
 //! are logged.
 
-pub mod command;
-
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::multipart::{Form, Part};
@@ -19,15 +17,16 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
+use crate::chat::{execute, Reply};
 use crate::core::time::serde_duration;
-use crate::core::{AlertLevel, Command};
-use crate::run::CoreHandle;
-use command::{
-    format_alert, format_events, format_status, is_allowed, parse_chat_ids, parse_command,
-    safe_path_segment, silent, BotCommand, CommandError, HELP,
+use crate::delivery::{scrub, with_retry, ApiError};
+use crate::frigate::FrigateClient;
+use crate::notify::{
+    format_alert, help, is_allowed, parse_command, parse_ids, silent, Alert, CommandError,
 };
+use crate::run::CoreHandle;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -74,45 +73,13 @@ impl TelegramConfig {
             return Ok(None);
         };
         let chats = env(&self.chat_ids_env).unwrap_or_default();
-        let chats =
-            parse_chat_ids(&chats).map_err(|e| anyhow::anyhow!("{}: {e}", self.chat_ids_env))?;
+        let chats = parse_ids::<i64>(&chats, "Telegram chat id")
+            .map_err(|e| anyhow::anyhow!("{}: {e}", self.chat_ids_env))?;
         Ok(Some(Credentials {
             token: token.trim().to_string(),
             chats,
         }))
     }
-}
-
-/// An alert for the worker.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Alert {
-    pub level: AlertLevel,
-    pub text: String,
-    pub snapshot_ref: Option<String>,
-}
-
-#[derive(Debug)]
-enum ApiError {
-    /// Worth retrying (network, rate limit, server error).
-    Retry {
-        after: Option<Duration>,
-        reason: String,
-    },
-    /// Retrying will not help (bad request, blocked by the user).
-    Fatal(String),
-}
-
-impl std::fmt::Display for ApiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ApiError::Retry { reason, .. } | ApiError::Fatal(reason) => f.write_str(reason),
-        }
-    }
-}
-
-/// Never let the token reach a log line.
-fn scrub(e: reqwest::Error) -> String {
-    e.without_url().to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,7 +135,7 @@ pub struct Bot {
     http: reqwest::Client,
     /// `<api_url>/bot<token>`: secret, never logged.
     base: String,
-    frigate_url: String,
+    frigate: FrigateClient,
 }
 
 impl Bot {
@@ -181,7 +148,7 @@ impl Bot {
         Ok(Bot {
             http,
             base: format!("{}/bot{token}", config.api_url.trim_end_matches('/')),
-            frigate_url: frigate_url.trim_end_matches('/').to_string(),
+            frigate: FrigateClient::new(frigate_url)?,
         })
     }
 
@@ -210,11 +177,7 @@ impl Bot {
                     .parameters
                     .and_then(|p| p.retry_after)
                     .map(Duration::from_secs);
-                if status.as_u16() == 429 || status.is_server_error() {
-                    Err(ApiError::Retry { after, reason })
-                } else {
-                    Err(ApiError::Fatal(reason))
-                }
+                Err(ApiError::from_status(status.as_u16(), after, reason))
             }
         }
     }
@@ -257,24 +220,12 @@ impl Bot {
             .map(|_| ())
     }
 
-    /// A JPEG from Frigate's API (`path` after `/api/`).
-    async fn frigate_jpeg(&self, path: &str) -> Result<Vec<u8>, String> {
-        let url = format!("{}/api/{path}", self.frigate_url);
-        let response = self
-            .http
-            .get(&url)
-            .timeout(Duration::from_secs(10))
-            .send()
+    /// Sends one text message, retrying transient failures; for
+    /// `homeguard test-alert`.
+    pub async fn send_text(&self, chat: i64, text: &str) -> Result<(), String> {
+        with_retry(|| self.send_message(chat, text, false))
             .await
-            .map_err(|e| e.to_string())?;
-        if !response.status().is_success() {
-            return Err(format!("{url}: {}", response.status()));
-        }
-        let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-        if bytes.is_empty() {
-            return Err(format!("{url}: empty"));
-        }
-        Ok(bytes.to_vec())
+            .map_err(|e| e.to_string())
     }
 
     /// Sends text, or a photo with the text as caption, retrying transient
@@ -292,47 +243,18 @@ impl Bot {
     }
 }
 
-const MAX_ATTEMPTS: u32 = 5;
-
-async fn with_retry<F, Fut>(mut attempt: F) -> Result<(), ApiError>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<(), ApiError>>,
-{
-    let mut backoff = crate::mqtt::Backoff::new(Duration::from_secs(30));
-    let mut tries = 0;
-    loop {
-        tries += 1;
-        match attempt().await {
-            Ok(()) => return Ok(()),
-            Err(ApiError::Retry { after, reason }) if tries < MAX_ATTEMPTS => {
-                let delay = after.unwrap_or_else(|| backoff.next_delay());
-                debug!(%reason, retry_in = ?delay, "Telegram call failed; retrying");
-                tokio::time::sleep(delay).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
 /// Sends every queued alert to every allowed chat.
 pub async fn alert_worker(bot: Bot, chats: Vec<i64>, mut alerts: mpsc::Receiver<Alert>) {
     while let Some(alert) = alerts.recv().await {
         let text = format_alert(alert.level, &alert.text);
         let photo = match alert.snapshot_ref.as_deref() {
-            Some(id) if safe_path_segment(id) => {
-                match bot.frigate_jpeg(&format!("events/{id}/snapshot.jpg")).await {
-                    Ok(photo) => Some(photo),
-                    Err(e) => {
-                        warn!(error = %e, "Frigate snapshot unavailable; sending text only");
-                        None
-                    }
+            Some(id) => match bot.frigate.event_snapshot(id).await {
+                Ok(photo) => Some(photo),
+                Err(e) => {
+                    warn!(error = %e, "Frigate snapshot unavailable; sending text only");
+                    None
                 }
-            }
-            Some(id) => {
-                warn!(snapshot_ref = %id, "ignoring a snapshot reference with unexpected characters");
-                None
-            }
+            },
             None => None,
         };
         for chat in &chats {
@@ -412,67 +334,24 @@ pub async fn command_loop(bot: Bot, config: TelegramConfig, chats: Vec<i64>, cor
                 warn!(chat, from = %who, command = %text, "ignored a Telegram command sent while homeguard was down");
                 continue;
             }
-            let reply = match parse_command(text, me.as_deref()) {
-                Ok(command) => answer(&bot, &core, chat, command, &who).await,
-                Err(CommandError::NotACommand | CommandError::OtherBot) => continue,
-                Err(e) => Some(format!("{e}\n\n{HELP}")),
-            };
-            if let Some(reply) = reply {
-                bot.deliver(chat, &reply, None, false).await;
-            }
-        }
-    }
-}
-
-/// Runs one command; the reply text, if any (a snapshot replies itself).
-async fn answer(
-    bot: &Bot,
-    core: &CoreHandle,
-    chat: i64,
-    command: BotCommand,
-    who: &str,
-) -> Option<String> {
-    info!(chat, from = %who, ?command, "Telegram command");
-    let by = format!("Telegram ({who})");
-    match command {
-        BotCommand::Status => Some(format_status(&core.snapshot().status)),
-        BotCommand::Events => Some(format_events(
-            &core.snapshot().recent(10),
-            crate::run::unix_ms(),
-        )),
-        BotCommand::Help => Some(HELP.to_string()),
-        BotCommand::Arm(mode) => Some(match core.command(Command::Arm(mode), by).await {
-            Ok(snapshot) => format_status(&snapshot.status),
-            Err(e) => format!("Failed: {e}"),
-        }),
-        BotCommand::Disarm => Some(match core.command(Command::Disarm, by).await {
-            Ok(snapshot) => format_status(&snapshot.status),
-            Err(e) => format!("Failed: {e}"),
-        }),
-        BotCommand::Snapshot(camera) => {
-            let known = core.snapshot().status.camera_ids().any(|c| c == camera);
-            if !known || !safe_path_segment(&camera) {
-                let cameras: Vec<String> = core
-                    .snapshot()
-                    .status
-                    .camera_ids()
-                    .map(str::to_string)
-                    .collect();
-                return Some(format!(
-                    "Unknown camera {camera:?}. Cameras: {}",
-                    cameras.join(", ")
-                ));
-            }
-            match bot.frigate_jpeg(&format!("{camera}/latest.jpg")).await {
-                Ok(photo) => {
-                    bot.deliver(chat, &camera, Some(photo), false).await;
-                    None
+            let reply = match parse_command(text, '/', me.as_deref()) {
+                Ok(command) => {
+                    execute(
+                        command,
+                        format!("Telegram ({who})"),
+                        '/',
+                        &core,
+                        &bot.frigate,
+                    )
+                    .await
                 }
-                Err(e) => {
-                    warn!(error = %e, "snapshot failed");
-                    Some(format!(
-                        "Could not get a picture from {camera} (is Frigate running?)"
-                    ))
+                Err(CommandError::NotACommand | CommandError::OtherBot) => continue,
+                Err(e) => Reply::Text(format!("{e}\n\n{}", help('/'))),
+            };
+            match reply {
+                Reply::Text(text) => bot.deliver(chat, &text, None, false).await,
+                Reply::Photo { caption, jpeg } => {
+                    bot.deliver(chat, &caption, Some(jpeg), false).await
                 }
             }
         }
