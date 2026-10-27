@@ -165,6 +165,19 @@ impl AlarmMachine {
         actions
     }
 
+    /// After a restart: back to armed in `mode` without an exit delay, as it
+    /// was before. (An entry delay or alarm in progress is not restored; if
+    /// the intrusion continues, the sensors trip again.)
+    pub fn restore(&mut self, mode: Mode) -> Vec<Action> {
+        self.set(
+            State::Armed { mode },
+            Some(Action::alert(
+                AlertLevel::High,
+                format!("homeguard restarted; armed again ({mode}) as before."),
+            )),
+        )
+    }
+
     /// Lets time-based transitions happen.
     pub fn tick(&mut self, at: Ts) -> Vec<Action> {
         match self.state.clone() {
@@ -669,6 +682,20 @@ mod tests {
             [Action::SendAlert { level: AlertLevel::Critical, text, .. }] if text.contains("WATER LEAK")
         ));
         assert_eq!(m.state(), &State::Disarmed);
+    }
+
+    #[test]
+    fn restore_rearms_without_exit_delay() {
+        let mut m = machine();
+        let actions = m.restore(Mode::Night);
+        assert_eq!(m.state(), &State::Armed { mode: Mode::Night });
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::SendAlert {
+                level: AlertLevel::High,
+                ..
+            }
+        )));
     }
 
     #[test]

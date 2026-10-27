@@ -107,6 +107,11 @@ impl Engine {
         &self.home
     }
 
+    /// After a restart, re-arm in the mode saved before it.
+    pub fn restore(&mut self, mode: crate::core::Mode) -> Vec<Action> {
+        self.machine.restore(mode)
+    }
+
     /// The next time a `Tick` would change something.
     pub fn next_deadline(&self) -> Option<Ts> {
         let windows = self.windows.values().map(|w| w.until);
@@ -292,9 +297,18 @@ impl Engine {
             if !window.sources.contains(&source) {
                 let first = window.reporters.first().cloned().unwrap_or_default();
                 let first_name = self.machine.catalog().display_name(&first).to_string();
+                let first_source = window
+                    .sources
+                    .iter()
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
                 let cause = Cause::new(
                     sensor,
-                    format!("motion in {zone} on {first_name} and {name} ({source})"),
+                    format!(
+                        "motion in {zone} from two sources: {first_name} ({first_source}), \
+                         then {name} ({source})"
+                    ),
                 );
                 self.windows.remove(&zone);
                 return self.machine.intrusion(at, cause, Delay::Immediate);

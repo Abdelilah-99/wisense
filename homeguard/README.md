@@ -65,8 +65,9 @@ The `homeguard` service is written in Rust and owns:
 
 ## Status
 
-Work in progress. The Docker Compose stack, the alarm state machine and the
-sensor fusion rules are in place; the `homeguard` service does not run yet.
+Work in progress. The Docker Compose stack, the alarm state machine, the
+sensor fusion rules and the MQTT integration work. Arming and disarming come
+with the Telegram bot and the dashboard.
 
 ## Quick start
 
@@ -168,6 +169,71 @@ The same alert (same cause: smoke on one sensor, tampering on one camera) is
 sent at most once every 5 minutes; the siren still reacts every time. Every
 event is logged whether or not it alerts. All durations and the score
 threshold are in the `[fusion]` section.
+
+## MQTT
+
+homeguard logs in to Mosquitto with `MQTT_HOMEGUARD_USER` /
+`MQTT_HOMEGUARD_PASSWORD` (the `[mqtt]` section names the variables) and
+reconnects with exponential backoff, up to a minute between attempts.
+
+It listens to:
+
+| Topic | From | Becomes |
+|---|---|---|
+| `zigbee2mqtt/<device>` | Zigbee2MQTT | `contact` → door/window open or closed, `occupancy: true` → PIR motion, `smoke: true`, `water_leak: true` |
+| `zigbee2mqtt/<device>/availability` | Zigbee2MQTT | device online / offline |
+| `frigate/events` | Frigate | a `person` (new or update, not a false positive) with its best score and event id |
+| `frigate/available` | Frigate | every camera online / offline |
+| `frigate/<camera>/status/detect` | Frigate | that camera online / offline (`disabled` counts as offline) |
+| `homeguard/wisense/<link>` | wisense bridge | wisense motion, heartbeat, offline |
+
+Device names map to sensor ids through `[zigbee.devices]` and
+`[wisense.links]`; a name that is not listed is used as the sensor id itself,
+so the simplest setup is to rename each Zigbee device to its sensor id in the
+Zigbee2MQTT frontend. Messages that do not parse are logged and dropped, and
+unknown fields are ignored.
+
+It publishes (for Home Assistant or anything else):
+
+| Topic | Payload | Retained |
+|---|---|---|
+| `homeguard/availability` | `online` / `offline` (last will) | yes |
+| `homeguard/state` | `{"state", "mode", "ha_state", "cause", "sensor", "snapshot_ref"}` | yes |
+| `homeguard/actions/alert` | `{"level", "text", "snapshot_ref"}` | no |
+| `homeguard/actions/siren` | `ON` / `OFF` | yes |
+| `homeguard/actions/lights` | `ON` | no |
+
+`ha_state` uses Home Assistant's alarm panel names (`armed_away`,
+`pending`, ...). If `[actuators]` names a Zigbee siren or plugs, homeguard
+also drives them directly through `zigbee2mqtt/<device>/set`.
+
+The arm mode is saved in the data directory: after a restart or power cut
+homeguard comes back armed in the same mode (an entry delay or alarm in
+progress is not resumed; if the intrusion continues, the sensors trip again).
+
+### Running
+
+```sh
+docker compose up -d homeguard      # on the hub
+docker compose logs -f homeguard
+```
+
+Or directly, for development (from `homeguard/`, with the broker running):
+
+```sh
+export MQTT_HOMEGUARD_USER=homeguard MQTT_HOMEGUARD_PASSWORD=...
+cargo run -- check-config            # validates config/homeguard.toml
+cargo run -- run --log debug
+```
+
+| Option / variable | Default | |
+|---|---|---|
+| `--config`, `HOMEGUARD_CONFIG` | `config/homeguard.toml` | configuration file |
+| `--data-dir`, `HOMEGUARD_DATA_DIR` | `data/homeguard` | saved arm state, heartbeat |
+| `--log`, `HOMEGUARD_LOG` | `info` | log filter, e.g. `debug` or `homeguard=debug,rumqttc=warn` |
+
+Diagnostics go to stderr. `homeguard healthcheck` (used by Docker) succeeds
+while the core loop is alive.
 
 ## Development
 

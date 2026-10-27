@@ -15,6 +15,8 @@ RUN apt-get update \
     && chown homeguard:homeguard /var/lib/homeguard
 COPY --from=build /src/target/release/homeguard /usr/local/bin/homeguard
 USER homeguard
+ENV HOMEGUARD_DATA_DIR=/var/lib/homeguard \
+    HOMEGUARD_CONFIG=/etc/homeguard/homeguard.toml
 WORKDIR /var/lib/homeguard
 ENTRYPOINT ["homeguard"]
-CMD ["run", "--config", "/etc/homeguard/homeguard.toml"]
+CMD ["run"]

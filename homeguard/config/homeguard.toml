@@ -56,6 +56,12 @@ zone = "living-room"
 name = "Living room motion"
 
 [[sensors]]
+id = "living_room_wisense"
+kind = "wisense"
+zone = "living-room"
+name = "Living room WiFi motion (wisense)"
+
+[[sensors]]
 id = "hallway_pir"
 kind = "pir"
 zone = "entrance"
@@ -80,3 +86,38 @@ name = "Kitchen sink leak sensor"
 id = "front_cam"
 zone = "entrance"
 name = "Front door camera"
+
+# --- Connections and device names ------------------------------------------
+
+[mqtt]
+# homeguard runs in the host network and reaches Mosquitto on loopback.
+host = "127.0.0.1"
+port = 1883
+client_id = "homeguard"
+# Names of the environment variables (from .env) holding the login.
+username_env = "MQTT_HOMEGUARD_USER"
+password_env = "MQTT_HOMEGUARD_PASSWORD"
+keep_alive = "30s"
+
+[zigbee]
+base_topic = "zigbee2mqtt"
+
+# Zigbee2MQTT friendly name → sensor id above. Only needed when they differ;
+# the simplest is to rename each device in Zigbee2MQTT to its sensor id.
+[zigbee.devices]
+# "0x00158d0008a1b2c3" = "front_door"
+
+[frigate]
+topic_prefix = "frigate"
+# Frigate's API on loopback, for snapshots.
+url = "http://127.0.0.1:5000"
+
+# wisense link id (the WiFi interface, e.g. wlp2s0, or an ESP32 link name)
+# → sensor id above.
+[wisense.links]
+wlp2s0 = "living_room_wisense"
+
+# Zigbee devices homeguard drives itself during an alarm (optional).
+[actuators]
+# siren = "hall_siren"
+lights = []
