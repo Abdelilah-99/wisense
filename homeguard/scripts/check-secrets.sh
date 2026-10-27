@@ -30,7 +30,7 @@ hits=$(grep_files '(password|passwd|token|secret|pin)[A-Z_]*["'"'"']?[[:space:]]
   | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(#|//)' \
   | grep -vE ':(ro|rw)$' \
   | grep -vE '\.rs:[0-9]+:.*(password|token|secret|pin)[a-z_]*: *(String|&|Option|Vec|bool|u[0-9]+)' \
-  | grep -vE '\.rs:[0-9]+:[[:space:]]*(password|token|secret|pin)[a-z_]*: *[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)*(\(\))?,?$' \
+  | grep -vE '\.rs:[0-9]+:[[:space:]]*(password|token|secret|pin)[a-z_]*: *[a-z_][a-z0-9_]*(\(\))?(\.[a-z_][a-z0-9_]*(\(\))?)*,?$' \
   | grep -viE 'change-?me|\$\{|\{FRIGATE_|<[a-z_ -]+>|example|placeholder|env::var|std::env|_env|secret_file|test|fn |let |\.rs:[0-9]+: *(//|///)' || true)
 [ -n "$hits" ] && fail "possible hard-coded password/token:"$'\n'"$hits"
 

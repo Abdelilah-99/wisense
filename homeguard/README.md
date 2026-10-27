@@ -66,8 +66,8 @@ The `homeguard` service is written in Rust and owns:
 ## Status
 
 Work in progress. The Docker Compose stack, the alarm state machine, the
-sensor fusion rules and the MQTT integration work. Arming and disarming come
-with the Telegram bot and the dashboard.
+sensor fusion rules, the MQTT integration, presence detection, the wisense
+bridge, simulation and Telegram alerts and commands work.
 
 ## Quick start
 
@@ -234,6 +234,58 @@ cargo run -- run --log debug
 
 Diagnostics go to stderr. `homeguard healthcheck` (used by Docker) succeeds
 while the core loop is alive.
+
+## Telegram
+
+Alerts arrive in Telegram, with the Frigate snapshot when a camera saw the
+cause, and the bot answers commands.
+
+### Set up the bot
+
+1. In Telegram, talk to [@BotFather](https://t.me/BotFather): send `/newbot`,
+   choose a name and a user name ending in `bot`. It replies with a token like
+   `123456789:AA...`. Put it in `.env` as `TELEGRAM_BOT_TOKEN`.
+2. Send any message to your new bot (it cannot write to you first).
+3. Find your chat id: open
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser and read
+   `"chat":{"id":...}`. For a group, add the bot to the group, send a message
+   there, and use the group's (negative) id.
+4. Put the ids in `.env` as `TELEGRAM_CHAT_IDS=123456789,-1001234567890`.
+5. `docker compose restart homeguard`, then send `/status` to the bot.
+
+### Alerts
+
+| Level | Sent as |
+|---|---|
+| critical (alarm, smoke, leak) | 🚨 with sound, photo if there is a snapshot |
+| high (entry delay, tampering, restart) | ⚠️ with sound |
+| info (arming, disarming, owner arriving) | ℹ️ with sound |
+| low (unconfirmed motion) | silent |
+
+Alerts go through a queue, so homeguard never waits for Telegram. Each one
+is retried with backoff (up to 5 attempts, honouring Telegram's rate limits).
+If the Frigate snapshot cannot be fetched or sent, the text is sent instead.
+
+### Commands
+
+| Command | |
+|---|---|
+| `/status` | arm state, cause, devices offline, open doors, who is home |
+| `/arm away`, `/arm home`, `/arm night` | arm (after the exit delay) |
+| `/disarm` | disarm |
+| `/snapshot <camera>` | the latest picture from a camera |
+| `/events` | the last 10 events |
+
+Only chats listed in `TELEGRAM_CHAT_IDS` get answers; messages from anyone
+else are ignored and logged. Commands sent while homeguard was down (Telegram
+keeps them for up to 24 hours) are ignored if older than 2 minutes, so a
+stale `/disarm` never takes effect hours later. Telegram has no disarm PIN:
+anyone holding an allowed phone, unlocked, can disarm. Protect your Telegram
+app with a passcode, and keep the allow-list short.
+
+Run `homeguard run --dry-run` to log alerts without sending them (Telegram
+commands are off too). Without `TELEGRAM_BOT_TOKEN`, homeguard runs but only
+logs its alerts, with a warning at startup. The token is never logged.
 
 ## Phone presence
 

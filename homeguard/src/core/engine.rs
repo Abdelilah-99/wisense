@@ -102,6 +102,11 @@ impl Engine {
         &self.offline
     }
 
+    /// The configured people, in config order.
+    pub fn known_people(&self) -> impl Iterator<Item = &str> {
+        self.presence.people.iter().map(|p| p.name.as_str())
+    }
+
     /// Who is home, as last reported.
     pub fn presence(&self) -> &BTreeMap<String, bool> {
         &self.home

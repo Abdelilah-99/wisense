@@ -23,6 +23,8 @@ path = "src/bin/homeguard-wisense-bridge.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
+# Telegram Bot API (HTTPS, rustls) and Frigate snapshots.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "multipart"] }
 # Plain TCP to the broker on loopback: no TLS stack needed.
 rumqttc = { version = "0.25", default-features = false }
 serde = { version = "1", features = ["derive"] }

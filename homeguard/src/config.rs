@@ -16,6 +16,7 @@ use crate::core::time::serde_duration;
 use crate::core::{CoreConfig, Engine};
 use crate::parse::Mapping;
 use crate::presence::ProbeConfig;
+use crate::telegram::TelegramConfig;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -26,6 +27,7 @@ pub struct AppConfig {
     pub wisense: WisenseConfig,
     pub actuators: Actuators,
     pub presence: ProbeConfig,
+    pub telegram: TelegramConfig,
 }
 
 /// The shell's sections. Parsed separately from [`CoreConfig`] (the same
@@ -44,6 +46,8 @@ struct ShellSections {
     actuators: Actuators,
     #[serde(default)]
     presence: ProbeConfig,
+    #[serde(default)]
+    telegram: TelegramConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -154,6 +158,7 @@ impl AppConfig {
             wisense: shell.wisense,
             actuators: shell.actuators,
             presence: shell.presence,
+            telegram: shell.telegram,
         };
         config.validate()?;
         Ok(config)

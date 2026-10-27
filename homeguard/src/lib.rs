@@ -4,7 +4,8 @@
 //! - [`parse`]: pure parsers for the MQTT messages homeguard listens to.
 //! - [`publish`]: what homeguard publishes, as a pure function of actions.
 //! - [`sim`]: scripted scenarios replayed through the real core.
-//! - [`config`], [`mqtt`], [`run`], [`bridge`], [`presence`]: the imperative shell.
+//! - [`config`], [`mqtt`], [`run`], [`bridge`], [`presence`], [`telegram`]:
+//!   the imperative shell.
 
 pub mod bridge;
 pub mod config;
@@ -15,6 +16,8 @@ pub mod presence;
 pub mod publish;
 pub mod run;
 pub mod sim;
+pub mod status;
+pub mod telegram;
 
 /// Diagnostics go to stderr, filtered by `filter` (e.g. `info`, `debug`,
 /// `homeguard=debug,rumqttc=warn`); stdout stays free for command output.

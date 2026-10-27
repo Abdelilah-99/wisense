@@ -76,7 +76,7 @@ name = "Living room motion"
 id = "living_room_wisense"
 kind = "wisense"
 zone = "living-room"
-name = "Living room WiFi motion (wisense)"
+name = "Living room WiFi motion"
 
 [[sensors]]
 id = "hallway_pir"
@@ -133,6 +133,17 @@ url = "http://127.0.0.1:5000"
 # → sensor id above.
 [wisense.links]
 wlp2s0 = "living_room_wisense"
+
+# Alerts and commands (see README, "Telegram"). The token and the chat ids
+# come from .env; without a token, alerts are only logged.
+[telegram]
+token_env = "TELEGRAM_BOT_TOKEN"
+# Comma-separated chat ids: alerts go to all, only they may send commands.
+chat_ids_env = "TELEGRAM_CHAT_IDS"
+api_url = "https://api.telegram.org"
+poll_timeout = "30s"
+# Commands sent while homeguard was down are ignored if older than this.
+max_command_age = "2m"
 
 # Zigbee devices homeguard drives itself during an alarm (optional).
 [actuators]

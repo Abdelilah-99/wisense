@@ -1,22 +1,27 @@
 //! `homeguard run`: the imperative shell around the core.
 //!
-//! One task owns the [`Engine`]. Everything else (MQTT, the ticker) sends it
-//! events over a channel; it stamps each with the current time, runs the
-//! core, and dispatches the resulting actions. Dispatch never waits on the
-//! network, so a slow broker cannot delay a decision.
+//! One task owns the [`Engine`]. Everything else (MQTT, presence, Telegram,
+//! the ticker) sends it events or commands over channels; it stamps each
+//! with the current time, runs the core, and dispatches the resulting
+//! actions. Dispatch never waits on the network (alerts are queued for the
+//! Telegram worker, MQTT messages for the client), so a slow broker or API
+//! cannot delay a decision. After each event the core publishes a
+//! [`Snapshot`] that the Telegram bot and the dashboard read.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use rumqttc::AsyncClient;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{error, info, warn};
 
 use crate::config::AppConfig;
-use crate::core::{Action, AlertLevel, Engine, Event, Input, Mode, State, Ts};
+use crate::core::{Action, AlertLevel, Command, Engine, Event, Input, Mode, State, Ts};
 use crate::mqtt::{self, Connection};
 use crate::publish::{state_message, Outgoing, Publisher, AVAILABILITY_TOPIC};
+use crate::status::{LogLine, RecentLog, Status};
+use crate::telegram::{self, Alert};
 
 /// How often time is fed to the core when nothing else happens.
 const TICK: Duration = Duration::from_millis(500);
@@ -24,6 +29,8 @@ const TICK: Duration = Duration::from_millis(500);
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(10);
 pub const HEARTBEAT_FILE: &str = "heartbeat";
 const ARMED_FILE: &str = "armed";
+/// Recent events kept in memory for /events and the dashboard.
+const RECENT: usize = 50;
 
 /// The runtime clock: milliseconds since the process started.
 #[derive(Debug, Clone, Copy)]
@@ -43,20 +50,129 @@ impl Clock {
     }
 }
 
-pub async fn run(config: AppConfig, data_dir: PathBuf) -> anyhow::Result<()> {
-    let (username, password) = config
-        .mqtt
-        .credentials(|name| std::env::var(name).ok())
-        .context("MQTT credentials")?;
+/// Wall-clock time for logs and the event list.
+pub fn unix_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+/// What readers see: the status and recent events, newest first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Snapshot {
+    pub status: Status,
+    recent: Vec<LogLine>,
+}
+
+impl Snapshot {
+    pub fn new(status: Status, recent: Vec<LogLine>) -> Self {
+        Snapshot { status, recent }
+    }
+
+    /// The newest `n` events, newest first.
+    pub fn recent(&self, n: usize) -> Vec<LogLine> {
+        self.recent.iter().take(n).cloned().collect()
+    }
+}
+
+struct CommandRequest {
+    command: Command,
+    by: String,
+    reply: oneshot::Sender<Snapshot>,
+}
+
+/// How the bot and the dashboard talk to the core.
+#[derive(Clone)]
+pub struct CoreHandle {
+    commands: mpsc::Sender<CommandRequest>,
+    snapshot: watch::Receiver<Snapshot>,
+}
+
+impl CoreHandle {
+    /// Runs a command and returns the snapshot right after it.
+    pub async fn command(&self, command: Command, by: String) -> anyhow::Result<Snapshot> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(CommandRequest { command, by, reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("homeguard is shutting down"))?;
+        answer
+            .await
+            .map_err(|_| anyhow::anyhow!("homeguard is shutting down"))
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        self.snapshot.borrow().clone()
+    }
+
+    /// A handle backed by a fixed snapshot that records the commands it
+    /// receives (answering each with that snapshot). For tests of the bot
+    /// and the dashboard; needs a Tokio runtime.
+    pub fn for_tests(snapshot: Snapshot) -> (CoreHandle, mpsc::Receiver<(Command, String)>) {
+        let (commands, mut requests) = mpsc::channel::<CommandRequest>(8);
+        let (seen_tx, seen_rx) = mpsc::channel(8);
+        let (_, receiver) = watch::channel(snapshot.clone());
+        let handle = CoreHandle {
+            commands,
+            snapshot: receiver,
+        };
+        tokio::spawn(async move {
+            while let Some(request) = requests.recv().await {
+                let _ = seen_tx.send((request.command, request.by)).await;
+                let _ = request.reply.send(snapshot.clone());
+            }
+        });
+        (handle, seen_rx)
+    }
+}
+
+pub struct RunOptions {
+    pub data_dir: PathBuf,
+    /// Log alerts instead of sending them to Telegram.
+    pub dry_run: bool,
+}
+
+pub async fn run(config: AppConfig, options: RunOptions) -> anyhow::Result<()> {
+    let env = |name: &str| std::env::var(name).ok();
+    let (username, password) = config.mqtt.credentials(env).context("MQTT credentials")?;
     let mut engine = config.engine()?;
-    let phones = config.presence.phones(|name| std::env::var(name).ok())?;
+    let phones = config.presence.phones(env)?;
     let sweep = config.presence.sweep()?;
+    let telegram = if options.dry_run {
+        warn!("dry run: alerts are logged, not sent to Telegram, and Telegram commands are off");
+        None
+    } else {
+        let credentials = config.telegram.credentials(env).context("Telegram")?;
+        if credentials.is_none() {
+            warn!(
+                "{} is not set: Telegram is OFF, alerts are only logged",
+                config.telegram.token_env
+            );
+        }
+        credentials
+    };
+    let data_dir = options.data_dir;
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating data directory {}", data_dir.display()))?;
 
     let (client, eventloop) = Connection::from_config(&config.mqtt, username, password).open();
     let (events_tx, events_rx) = mpsc::channel::<Event>(1024);
+    let (commands_tx, commands_rx) = mpsc::channel::<CommandRequest>(32);
+    let mut recent = RecentLog::new(RECENT);
+    let (snapshot_tx, snapshot_rx) = watch::channel(Snapshot::new(
+        Status::from_engine(&engine),
+        recent.latest(RECENT),
+    ));
+    let handle = CoreHandle {
+        commands: commands_tx,
+        snapshot: snapshot_rx,
+    };
     let clock = Clock::start();
+
     if !phones.is_empty() {
         crate::presence::warn_about_randomized_macs(&phones);
         tokio::spawn(crate::presence::run(
@@ -68,6 +184,26 @@ pub async fn run(config: AppConfig, data_dir: PathBuf) -> anyhow::Result<()> {
             events_tx.clone(),
         ));
     }
+    let alerts = match telegram {
+        Some(credentials) => {
+            let bot =
+                telegram::Bot::new(&config.telegram, &credentials.token, &config.frigate.url)?;
+            let (alerts_tx, alerts_rx) = mpsc::channel::<Alert>(256);
+            tokio::spawn(telegram::alert_worker(
+                bot.clone(),
+                credentials.chats.clone(),
+                alerts_rx,
+            ));
+            tokio::spawn(telegram::command_loop(
+                bot,
+                config.telegram.clone(),
+                credentials.chats,
+                handle.clone(),
+            ));
+            Some(alerts_tx)
+        }
+        None => None,
+    };
     tokio::spawn(mqtt::run_incoming(
         eventloop,
         client.clone(),
@@ -78,6 +214,7 @@ pub async fn run(config: AppConfig, data_dir: PathBuf) -> anyhow::Result<()> {
         broker = %format!("{}:{}", config.mqtt.host, config.mqtt.port),
         sensors = engine.catalog().sensors().count(),
         cameras = engine.catalog().cameras().count(),
+        telegram = alerts.is_some(),
         "homeguard started"
     );
 
@@ -89,11 +226,12 @@ pub async fn run(config: AppConfig, data_dir: PathBuf) -> anyhow::Result<()> {
             siren_duration: config.core.alarm.auto_reset,
         },
         data_dir: data_dir.clone(),
+        alerts,
     };
     match read_armed(&data_dir) {
         Ok(Some(mode)) => {
             let actions = engine.restore(mode);
-            dispatcher.dispatch(&actions);
+            dispatcher.dispatch(&actions, &mut recent);
         }
         Ok(None) => dispatcher.send(state_message(engine.state())),
         Err(e) => {
@@ -101,7 +239,12 @@ pub async fn run(config: AppConfig, data_dir: PathBuf) -> anyhow::Result<()> {
         }
     }
 
-    core_loop(engine, events_rx, clock, &mut dispatcher).await;
+    let channels = Channels {
+        events: events_rx,
+        commands: commands_rx,
+        snapshot: snapshot_tx,
+    };
+    core_loop(engine, channels, clock, &mut dispatcher, recent).await;
 
     mqtt::publish(
         &client,
@@ -118,11 +261,18 @@ pub async fn run(config: AppConfig, data_dir: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+struct Channels {
+    events: mpsc::Receiver<Event>,
+    commands: mpsc::Receiver<CommandRequest>,
+    snapshot: watch::Sender<Snapshot>,
+}
+
 async fn core_loop(
     mut engine: Engine,
-    mut events: mpsc::Receiver<Event>,
+    mut channels: Channels,
     clock: Clock,
     dispatcher: &mut Dispatcher,
+    mut recent: RecentLog,
 ) {
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -130,16 +280,32 @@ async fn core_loop(
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     loop {
-        let event = tokio::select! {
-            event = events.recv() => match event {
-                Some(event) => event,
+        let (event, reply) = tokio::select! {
+            event = channels.events.recv() => match event {
+                Some(event) => (event, None),
                 None => break,
             },
-            _ = ticker.tick() => Event::Tick,
+            request = channels.commands.recv() => match request {
+                Some(r) => (Event::Command { command: r.command, by: r.by }, Some(r.reply)),
+                None => break,
+            },
+            _ = ticker.tick() => (Event::Tick, None),
             _ = &mut shutdown => break,
         };
         let actions = engine.handle(&Input::new(clock.now(), event));
-        dispatcher.dispatch(&actions);
+        dispatcher.dispatch(&actions, &mut recent);
+
+        let snapshot = Snapshot::new(Status::from_engine(&engine), recent.latest(RECENT));
+        channels.snapshot.send_if_modified(|current| {
+            let changed = *current != snapshot;
+            if changed {
+                *current = snapshot.clone();
+            }
+            changed
+        });
+        if let Some(reply) = reply {
+            let _ = reply.send(snapshot);
+        }
 
         if last_heartbeat.is_none_or(|t| t.elapsed() >= HEARTBEAT_EVERY) {
             last_heartbeat = Some(Instant::now());
@@ -175,16 +341,41 @@ struct Dispatcher {
     client: AsyncClient,
     publisher: Publisher,
     data_dir: PathBuf,
+    /// `None` when Telegram is off or in dry-run mode.
+    alerts: Option<mpsc::Sender<Alert>>,
 }
 
 impl Dispatcher {
-    fn dispatch(&mut self, actions: &[Action]) {
+    fn dispatch(&mut self, actions: &[Action], recent: &mut RecentLog) {
+        let now = unix_ms();
         for action in actions {
-            log_action(action);
-            if let Action::StateChanged { state } = action {
-                if let Err(e) = write_armed(&self.data_dir, state) {
-                    error!(error = %format!("{e:#}"), "could not save the arm state");
+            log_action(action, self.alerts.is_some());
+            if let Some(line) = LogLine::from_action(now, action) {
+                recent.push(line);
+            }
+            match action {
+                Action::StateChanged { state } => {
+                    if let Err(e) = write_armed(&self.data_dir, state) {
+                        error!(error = %format!("{e:#}"), "could not save the arm state");
+                    }
                 }
+                Action::SendAlert {
+                    level,
+                    text,
+                    snapshot_ref,
+                } => {
+                    if let Some(alerts) = &self.alerts {
+                        let alert = Alert {
+                            level: *level,
+                            text: text.clone(),
+                            snapshot_ref: snapshot_ref.clone(),
+                        };
+                        if let Err(e) = alerts.try_send(alert) {
+                            error!(error = %e, "Telegram alert queue full; alert dropped");
+                        }
+                    }
+                }
+                _ => {}
             }
             for message in self.publisher.outgoing(action) {
                 self.send(message);
@@ -204,11 +395,15 @@ impl Dispatcher {
     }
 }
 
-fn log_action(action: &Action) {
+fn log_action(action: &Action, sending: bool) {
+    let note = match action {
+        Action::SendAlert { .. } if !sending => " (not sent: Telegram off)",
+        _ => "",
+    };
     match action {
-        Action::SendAlert { level, .. } if *level >= AlertLevel::High => warn!("{action}"),
+        Action::SendAlert { level, .. } if *level >= AlertLevel::High => warn!("{action}{note}"),
         Action::SirenOn => warn!("{action}"),
-        _ => info!("{action}"),
+        _ => info!("{action}{note}"),
     }
 }
 

@@ -40,6 +40,9 @@ enum Command {
             default_value = "config/homeguard.toml"
         )]
         config: PathBuf,
+        /// Log alerts instead of sending them to Telegram.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Check a configuration file and exit.
     CheckConfig {
@@ -85,9 +88,13 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Run { config } => {
+        Command::Run { config, dry_run } => {
             let config = AppConfig::load(&config)?;
-            tokio::runtime::Runtime::new()?.block_on(homeguard::run::run(config, cli.data_dir))
+            let options = homeguard::run::RunOptions {
+                data_dir: cli.data_dir,
+                dry_run,
+            };
+            tokio::runtime::Runtime::new()?.block_on(homeguard::run::run(config, options))
         }
         Command::CheckConfig { config } => {
             let loaded = AppConfig::load(&config)?;
