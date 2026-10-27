@@ -12,6 +12,15 @@ use crate::core::Event;
 use crate::parse::Mapping;
 use crate::publish::{Outgoing, AVAILABILITY_TOPIC};
 
+/// A last-will message.
+pub struct Will {
+    pub topic: String,
+    pub payload: Vec<u8>,
+    /// Retained wills suit a state topic such as homeguard/availability; an
+    /// event stream must not keep a stale "offline" for new subscribers.
+    pub retain: bool,
+}
+
 /// Connection settings for one client.
 pub struct Connection {
     pub client_id: String,
@@ -21,7 +30,7 @@ pub struct Connection {
     pub password: String,
     pub keep_alive: Duration,
     /// Published by the broker if this client disappears.
-    pub last_will: Option<(String, Vec<u8>)>,
+    pub last_will: Option<Will>,
 }
 
 impl Connection {
@@ -33,7 +42,11 @@ impl Connection {
             username,
             password,
             keep_alive: config.keep_alive,
-            last_will: Some((AVAILABILITY_TOPIC.into(), b"offline".to_vec())),
+            last_will: Some(Will {
+                topic: AVAILABILITY_TOPIC.into(),
+                payload: b"offline".to_vec(),
+                retain: true,
+            }),
         }
     }
 
@@ -41,8 +54,13 @@ impl Connection {
         let mut options = MqttOptions::new(self.client_id, self.host, self.port);
         options.set_credentials(self.username, self.password);
         options.set_keep_alive(self.keep_alive);
-        if let Some((topic, payload)) = self.last_will {
-            options.set_last_will(LastWill::new(topic, payload, QoS::AtLeastOnce, true));
+        if let Some(will) = self.last_will {
+            options.set_last_will(LastWill::new(
+                will.topic,
+                will.payload,
+                QoS::AtLeastOnce,
+                will.retain,
+            ));
         }
         AsyncClient::new(options, 256)
     }

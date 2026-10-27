@@ -291,13 +291,14 @@ fn message(link: &str, message: &WisenseMessage) -> anyhow::Result<Outgoing> {
 /// end of input so a service manager restarts the pipeline.
 pub async fn run(options: BridgeOptions) -> anyhow::Result<()> {
     let last_will = match &options.link {
-        Some(link) => Some((
-            topic(link),
-            serde_json::to_vec(&WisenseMessage::Offline {
+        Some(link) => Some(mqtt::Will {
+            topic: topic(link),
+            payload: serde_json::to_vec(&WisenseMessage::Offline {
                 zone: options.zone.clone(),
             })
             .context("encoding the last will")?,
-        )),
+            retain: false,
+        }),
         None => None,
     };
     let (client, mut eventloop) = Connection {

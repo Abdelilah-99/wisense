@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Abdelilah-99/wisense"
 readme = "README.md"
 publish = false
+default-run = "homeguard"
 
 # Standalone: not a member of the wisense crate at the repository root.
 [workspace]
